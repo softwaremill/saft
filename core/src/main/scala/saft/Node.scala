@@ -114,6 +114,8 @@ object StateMachine:
 
 //
 
+val StateLogAnnotation = "state"
+
 class Node(
     nodeId: NodeId,
     requests: Queue[ServerEvent],
@@ -124,66 +126,67 @@ class Node(
 ) {
   def start(state: ServerState): UIO[Unit] = Timer(electionTimeout, requests).flatMap(timer => follower(state, FollowerState(None), timer))
 
-  private def follower(state: ServerState, followerState: FollowerState, electionTimer: Timer): UIO[Unit] = {
-    requests.take.flatMap {
-      case Timeout => candidate(state, electionTimer)
+  private def follower(state: ServerState, followerState: FollowerState, electionTimer: Timer): UIO[Unit] =
+    ZIO.logAnnotate(StateLogAnnotation, "follower") {
+      requests.take.flatMap {
+        case Timeout => candidate(state, electionTimer)
 
-      case RequestReceived(rv: RequestVote, respond) =>
-        val state2 = state.updateTerm(rv.term)
+        case RequestReceived(rv: RequestVote, respond) =>
+          val state2 = state.updateTerm(rv.term)
 
-        val (response, state3) = {
-          if ((rv.term < state2.currentTerm) || state2.votedForOtherThan(rv.candidateId) || state2.hasEntriesAfter(rv.lastLog)) {
-            (RequestVoteResponse(state2.currentTerm, voteGranted = false), state2)
-          } else {
-            (RequestVoteResponse(state2.currentTerm, voteGranted = true), state2.copy(votedFor = Some(rv.candidateId)))
+          val (response, state3) = {
+            if ((rv.term < state2.currentTerm) || state2.votedForOtherThan(rv.candidateId) || state2.hasEntriesAfter(rv.lastLog)) {
+              (RequestVoteResponse(state2.currentTerm, voteGranted = false), state2)
+            } else {
+              (RequestVoteResponse(state2.currentTerm, voteGranted = true), state2.copy(votedFor = Some(rv.candidateId)))
+            }
           }
-        }
 
-        electionTimer.restart.flatMap(newElectionTimer => respond(response) *> follower(state3, followerState, newElectionTimer))
+          electionTimer.restart.flatMap(newElectionTimer => respond(response) *> follower(state3, followerState, newElectionTimer))
 
-      case RequestReceived(ae: AppendEntries, respond) =>
-        val state2 = state.updateTerm(ae.term)
+        case RequestReceived(ae: AppendEntries, respond) =>
+          val state2 = state.updateTerm(ae.term)
 
-        val (response, state3) = if (ae.term < state2.currentTerm || !state2.hasEntryAtTerm(ae.prevLog)) {
-          (AppendEntriesResponse(state2.currentTerm, success = false), state2)
-        } else {
-          (
-            AppendEntriesResponse(state2.currentTerm, success = true),
-            state2.appendEntries(ae.entries, ae.prevLog.map(_.index)).updateCommitIndex(ae.leaderCommit)
-          )
-        }
-
-        ZIO.foreach(state3.indexesToApply)(i => stateMachine(state3.log(i))).flatMap { _ =>
-          val state4 = state3.updateLastAppliedToCommit()
-
-          electionTimer.restart
-            .flatMap(newElectionTimer =>
-              respond(response) *> follower(state4, followerState.copy(leaderId = Some(ae.leaderId)), newElectionTimer)
+          val (response, state3) = if (ae.term < state2.currentTerm || !state2.hasEntryAtTerm(ae.prevLog)) {
+            (AppendEntriesResponse(state2.currentTerm, success = false), state2)
+          } else {
+            (
+              AppendEntriesResponse(state2.currentTerm, success = true),
+              state2.appendEntries(ae.entries, ae.prevLog.map(_.index)).updateCommitIndex(ae.leaderCommit)
             )
-        }
+          }
 
-      case RequestReceived(_: NewEntry, respond) => respond(RedirectToLeaderResponse(followerState.leaderId))
+          ZIO.foreach(state3.indexesToApply)(i => stateMachine(state3.log(i))).flatMap { _ =>
+            val state4 = state3.updateLastAppliedToCommit()
 
-      // ignore
-      case RequestReceived(_: RequestVoteResponse, _)      => ZIO.unit
-      case RequestReceived(_: AppendEntriesResponse, _)    => ZIO.unit
-      case RequestReceived(_: NewEntryResponse.type, _)    => ZIO.unit
-      case RequestReceived(_: RedirectToLeaderResponse, _) => ZIO.unit
+            electionTimer.restart
+              .flatMap(newElectionTimer =>
+                respond(response) *> follower(state4, followerState.copy(leaderId = Some(ae.leaderId)), newElectionTimer)
+              )
+          }
+
+        case RequestReceived(_: NewEntry, respond) => respond(RedirectToLeaderResponse(followerState.leaderId))
+
+        // ignore
+        case RequestReceived(_: RequestVoteResponse, _)      => ZIO.unit
+        case RequestReceived(_: AppendEntriesResponse, _)    => ZIO.unit
+        case RequestReceived(_: NewEntryResponse.type, _)    => ZIO.unit
+        case RequestReceived(_: RedirectToLeaderResponse, _) => ZIO.unit
+      }
     }
-  }
 
   private def candidate(state: ServerState, timer: Timer): UIO[Unit] = ???
 }
 
 object Saft extends ZIOAppDefault with Logging {
   def run: Task[Unit] = {
-    val numberOfNodes = 1
-    val electionTimeoutDuration = Duration.fromMillis(5000)
-    val electionRandomization = 100
+    val numberOfNodes = 5
+    val electionTimeoutDuration = Duration.fromMillis(1000)
+    val electionRandomization = 1000
 
     val nodes = (1 to numberOfNodes).map(i => NodeId(s"node$i"))
     for {
-      queues <- ZIO.foreach(nodes)(nodeId => Queue.unbounded[ServerEvent].map(nodeId -> _)).map(_.toMap)
+      queues <- ZIO.foreach(nodes)(nodeId => Queue.unbounded[ServerEvent].map(addLogging).map(nodeId -> _)).map(_.toMap)
       stateMachines <- ZIO
         .foreach(nodes)(nodeId => StateMachine(logEntry => Console.printLine(s"[$nodeId] APPLY: $logEntry").orDie).map(nodeId -> _))
         .map(_.toMap)
@@ -204,18 +207,22 @@ object Saft extends ZIOAppDefault with Logging {
     } yield ()
   }
 
-  // override def run: ZIO[Any, Any, Any] = (ZIO.log("abc") *> ZIO.dieMessage("xyz"))
+  private def addLogging(queue: Queue[ServerEvent]): Queue[ServerEvent] = new Queue[ServerEvent]:
+    override def awaitShutdown(implicit trace: Trace): UIO[Unit] = queue.awaitShutdown
+    override def capacity: Int = queue.capacity
+    override def isShutdown(implicit trace: Trace): UIO[Boolean] = queue.isShutdown
+    override def offer(a: ServerEvent)(implicit trace: Trace): UIO[Boolean] = queue.offer(a)
+    override def offerAll[A1 <: ServerEvent](as: Iterable[A1])(implicit trace: Trace): UIO[Chunk[A1]] = queue.offerAll(as)
+    override def shutdown(implicit trace: Trace): UIO[Unit] = queue.shutdown
+    override def size(implicit trace: Trace): UIO[Int] = queue.size
+    override def take(implicit trace: Trace): UIO[ServerEvent] = queue.take.flatMap(log)
+    override def takeAll(implicit trace: Trace): UIO[Chunk[ServerEvent]] = queue.takeAll.flatMap(ses => ZIO.foreach(ses)(log))
+    override def takeUpTo(max: Int)(implicit trace: Trace): UIO[Chunk[ServerEvent]] =
+      queue.takeUpTo(max).flatMap(ses => ZIO.foreach(ses)(log))
 
-//  override def run: ZIO[Any, Any, Any] =
-//    ZIO.dieMessage("xyz").fork.flatMap(f => ZIO.sleep(Duration.fromMillis(100)) *> f.interrupt *> f.join)
+    private def log(se: ServerEvent): UIO[ServerEvent] = se match
+      case Timeout => ZIO.log("Timeout").as(se)
+      case request @ RequestReceived(message, respond) =>
+        ZIO.succeed(RequestReceived(message, response => ZIO.log(s"Request: $request, response: $response") *> respond(response)))
 
-  def run3: ZIO[Any, Throwable, Any] = Queue.unbounded[String].flatMap { q =>
-
-    val et = ZIO.random
-      .flatMap(_.nextIntBounded(100))
-      .flatMap(randomization => ZIO.sleep(Duration.fromMillis(100).plusMillis(randomization)))
-
-    val t = q.take.flatMap(s => Console.printLine(s))
-    q.offer("a") *> q.offer("b") *> et.raceFirst(t) *> et.raceFirst(t)
-  }
 }
