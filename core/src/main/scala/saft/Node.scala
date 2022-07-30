@@ -168,10 +168,9 @@ class Node(
         case RequestReceived(_: NewEntry, respond) => respond(RedirectToLeaderResponse(followerState.leaderId))
 
         // ignore
-        case RequestReceived(_: RequestVoteResponse, _)      => ZIO.unit
-        case RequestReceived(_: AppendEntriesResponse, _)    => ZIO.unit
-        case RequestReceived(_: NewEntryResponse.type, _)    => ZIO.unit
-        case RequestReceived(_: RedirectToLeaderResponse, _) => ZIO.unit
+        case RequestReceived(_: RequestVoteResponse, _)                => ZIO.unit
+        case RequestReceived(_: AppendEntriesResponse, _)              => ZIO.unit
+        case RequestReceived(_: ResponseMessage with ClientMessage, _) => ZIO.unit
       }
     }
 
