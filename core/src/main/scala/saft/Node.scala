@@ -87,18 +87,15 @@ case class RequestReceived(message: Message, respond: ResponseMessage => UIO[Uni
 
 //
 
-class Timer[T](timeout: UIO[Unit], queue: Queue[T], t: T, currentTimer: Fiber.Runtime[Nothing, Boolean]) {
-  def restart: UIO[Timer[T]] = currentTimer.interrupt *> (timeout *> queue.offer(t)).fork.map(new Timer(timeout, queue, t, _))
-  def waitForTimeout: UIO[T] = queue.take
+class Timer(timeout: UIO[Unit], queue: Enqueue[Timeout.type], currentTimer: Fiber.Runtime[Nothing, Boolean]) {
+  def restart: UIO[Timer] = currentTimer.interrupt *> (timeout *> queue.offer(Timeout)).fork.map(new Timer(timeout, queue, _))
 }
 
 object Timer {
-  // timeout - randomized
-  def apply[T](timeout: UIO[Unit], t: T): UIO[Timer[T]] =
+  def apply(timeout: UIO[Unit], queue: Enqueue[Timeout.type]): UIO[Timer] =
     for {
-      queue <- Queue.dropping[T](1)
       initialFiber <- ZIO.never.fork
-      initialTimer = new Timer[T](timeout, queue, t, initialFiber)
+      initialTimer = new Timer(timeout, queue, initialFiber)
       restartedTimer <- initialTimer.restart
     } yield restartedTimer
 }
@@ -119,13 +116,16 @@ object StateMachine:
 
 class Node(
     nodeId: NodeId,
-    receive: UIO[RequestReceived],
+    requests: Queue[ServerEvent],
     send: (NodeId, ServerMessage) => UIO[Unit],
     stateMachine: StateMachine,
-    nodes: Set[NodeId]
+    nodes: Set[NodeId],
+    electionTimeout: UIO[Unit]
 ) {
-  def follower(state: ServerState, followerState: FollowerState, electionTimer: Timer[Timeout.type]): UIO[Unit] = {
-    electionTimer.waitForTimeout.raceFirst(receive).flatMap {
+  def start(state: ServerState): UIO[Unit] = Timer(electionTimeout, requests).flatMap(timer => follower(state, FollowerState(None), timer))
+
+  private def follower(state: ServerState, followerState: FollowerState, electionTimer: Timer): UIO[Unit] = {
+    requests.take.flatMap {
       case Timeout => candidate(state, electionTimer)
 
       case RequestReceived(rv: RequestVote, respond) =>
@@ -172,7 +172,7 @@ class Node(
     }
   }
 
-  def candidate(state: ServerState, timer: Timer[Timeout.type]): UIO[Unit] = ???
+  private def candidate(state: ServerState, timer: Timer): UIO[Unit] = ???
 }
 
 object Saft extends ZIOAppDefault with Logging {
@@ -183,24 +183,20 @@ object Saft extends ZIOAppDefault with Logging {
 
     val nodes = (1 to numberOfNodes).map(i => NodeId(s"node$i"))
     for {
-      queues <- ZIO.foreach(nodes)(nodeId => Queue.unbounded[RequestReceived].map(nodeId -> _)).map(_.toMap)
+      queues <- ZIO.foreach(nodes)(nodeId => Queue.unbounded[ServerEvent].map(nodeId -> _)).map(_.toMap)
       stateMachines <- ZIO
         .foreach(nodes)(nodeId => StateMachine(logEntry => Console.printLine(s"[$nodeId] APPLY: $logEntry").orDie).map(nodeId -> _))
         .map(_.toMap)
-      receive = (nodeId: NodeId) => queues(nodeId).take
       send = {
         def doSend(nodeId: NodeId)(toNodeId: NodeId, msg: Message): UIO[Unit] =
           queues(toNodeId).offer(RequestReceived(msg, rspMsg => doSend(toNodeId)(nodeId, rspMsg))).unit
         doSend _
       }
-      initial = nodes.map(nodeId => new Node(nodeId, receive(nodeId), send(nodeId), stateMachines(nodeId), nodes.toSet))
       electionTimeout = ZIO.random
         .flatMap(_.nextIntBounded(electionRandomization))
         .flatMap(randomization => ZIO.sleep(electionTimeoutDuration.plusMillis(randomization)))
-      electionTimer <- Timer(electionTimeout, Timeout)
-      fibers <- ZIO.foreach(initial)(
-        _.follower(ServerState(Vector.empty, None, Term(1), None, None), FollowerState(None), electionTimer).fork
-      )
+      initial = nodes.map(nodeId => new Node(nodeId, queues(nodeId), send(nodeId), stateMachines(nodeId), nodes.toSet, electionTimeout))
+      fibers <- ZIO.foreach(initial)(_.start(ServerState(Vector.empty, None, Term(1), None, None)).fork)
       _ <- Console.printLine(s"$numberOfNodes nodes started. Press any key to exit.")
       _ <- Console.readLine
       _ <- ZIO.foreach(fibers)(f => f.interrupt *> f.join)
