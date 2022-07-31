@@ -129,7 +129,7 @@ class Node(
     electionTimeout: UIO[Unit]
 ) {
   private val otherNodes = nodes - nodeId
-  private val majority = Math.ceilDiv(nodes.size, 2)
+  private val majority = math.ceil(nodes.size.toDouble / 2).toInt
 
   def start(state: ServerState): UIO[Unit] = ZIO.logAnnotate(NodeIdLogAnnotation, nodeId.id) {
     Timer(electionTimeout, events).flatMap(timer => follower(state, FollowerState(None), timer))
