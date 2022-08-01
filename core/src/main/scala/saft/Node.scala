@@ -103,26 +103,42 @@ case class ServerState(
     case (Some(la), Some(ci)) => (la + 1) to ci
     case (Some(la), None)     => throw new IllegalStateException(s"Last applied is set to $la, but no commit index is set")
   }
-
 }
-case class LeaderState(nextIndex: Map[NodeId, LogIndex], matchIndex: Map[NodeId, Option[LogIndex]]):
+
+// the extra awaitingResponse is needed to properly reply to NewEntry requests once entries are replicated
+case class LeaderState(
+    nextIndex: Map[NodeId, LogIndex],
+    matchIndex: Map[NodeId, Option[LogIndex]],
+    awaitingResponses: Vector[(LogIndex, UIO[Unit])]
+):
   def appendSuccessful(nodeId: NodeId, lastIndex: Option[LogIndex]): LeaderState = lastIndex match
     case Some(last) =>
       LeaderState(
         nextIndex.updated(nodeId, LogIndex(math.max(nextIndex(nodeId), last + 1))),
-        matchIndex.updated(nodeId, Some(LogIndex(math.max(matchIndex(nodeId).getOrElse(-1), last))))
+        matchIndex.updated(nodeId, Some(LogIndex(math.max(matchIndex(nodeId).getOrElse(-1), last)))),
+        awaitingResponses
       )
     case None => this
+
   def appendFailed(nodeId: NodeId, firstIndex: Option[LogIndex]): LeaderState = firstIndex match
     case Some(first) =>
       LeaderState(
         nextIndex.updated(nodeId, LogIndex(math.min(nextIndex(nodeId), first - 1))),
-        matchIndex
+        matchIndex,
+        awaitingResponses
       )
     case None => this
+
   def commitIndex(ourIndex: Option[LogIndex], majority: Int): Option[LogIndex] =
     val indexes = (ourIndex :: matchIndex.values.toList).flatten
     indexes.filter(i => indexes.count(_ >= i) >= majority).maxOption
+
+  def addAwaitingResponse(index: LogIndex, respond: UIO[Unit]): LeaderState =
+    copy(awaitingResponses = awaitingResponses :+ (index, respond))
+
+  def removeAwaitingResponses(upToIndex: LogIndex): (LeaderState, Vector[UIO[Unit]]) =
+    val (doneWaiting, stillAwaiting) = awaitingResponses.span(_._1 <= upToIndex)
+    (copy(awaitingResponses = stillAwaiting), doneWaiting.map(_._2))
 
 case class FollowerState(leaderId: Option[NodeId])
 case class CandidateState(receivedVotes: Int)
@@ -285,13 +301,12 @@ class Node(
       // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
       otherNodes.map(_ -> state.lastEntryTerm.map(_.index).fold(LogIndex(0))(i => LogIndex(i + 1))).toMap,
       // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
-      otherNodes.map(_ -> None).toMap
+      otherNodes.map(_ -> None).toMap,
+      Vector.empty
     )
 
-    timer.restartHeartbeat.flatMap { newTimer =>
-      // Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server
-      sendAppendEntries(state, leaderState) *> leader(state, leaderState, newTimer)
-    }
+    // Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server
+    sendAppendEntries(state, leaderState, timer).flatMap(newTimer => leader(state, leaderState, newTimer))
   }
 
   private def leader(state: ServerState, leaderState: LeaderState, timer: Timer): UIO[Unit] =
@@ -299,13 +314,13 @@ class Node(
       nextEvent(state, timer) {
         // repeat during idle periods to prevent election timeouts (§5.2)
         case Timeout =>
-          timer.restartHeartbeat.flatMap(newTimer => sendAppendEntries(state, leaderState) *> leader(state, leaderState, newTimer))
+          sendAppendEntries(state, leaderState, timer).flatMap(newTimer => leader(state, leaderState, newTimer))
 
-        // If command received from client: append entry to local log, respond after entry applied to state machine (§5.3)
+        // If command received from client: append entry to local log
         case RequestReceived(NewEntry(value), respond) =>
           val state2 = state.appendEntry(LogEntry(value, state.currentTerm))
-          timer.restartHeartbeat.flatMap(newTimer => sendAppendEntries(state2, leaderState))
-          respond(RedirectToLeaderResponse(None))
+          val leaderState2 = leaderState.addAwaitingResponse(LogIndex(state.log.length - 1), respond(NewEntryAddedResponse))
+          sendAppendEntries(state2, leaderState2, timer).flatMap(leader(state2, leaderState2, _))
 
         // If successful: update nextIndex and matchIndex for follower (§5.3)
         case RequestReceived(AppendEntriesResponse(_, true, followerId, range), _) =>
@@ -315,13 +330,18 @@ class Node(
           if state.commitIndex != newCommitIndex
           then
             val state2 = state.modify(_.commitIndex).setTo(newCommitIndex)
-            timer.restartHeartbeat.flatMap(newTimer => sendAppendEntries(state2, leaderState2) *> leader(state2, leaderState2, newTimer))
+            val (leaderState3, responses) = newCommitIndex match
+              case None     => (leaderState2, Vector.empty)
+              case Some(ci) => leaderState2.removeAwaitingResponses(ci)
+
+            // respond after entry applied to state machine (§5.3)
+            ZIO.foreachPar(responses)(identity) *> sendAppendEntries(state2, leaderState3, timer).flatMap(leader(state2, leaderState3, _))
           else leader(state, leaderState2, timer)
 
         // If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
         case RequestReceived(AppendEntriesResponse(_, false, followerId, range), _) =>
           val leaderState2 = leaderState.appendFailed(followerId, range.map(_._1))
-          sendAppendEntry(followerId, state, leaderState) *> leader(state, leaderState2, timer)
+          sendAppendEntry(followerId, state, leaderState2) *> leader(state, leaderState2, timer)
 
         // ignore
         case RequestReceived(_: RequestVote, _)         => ZIO.unit
@@ -330,8 +350,8 @@ class Node(
       }
     }
 
-  private def sendAppendEntries(state: ServerState, leaderState: LeaderState): UIO[Unit] =
-    ZIO.foreachPar(otherNodes)(sendAppendEntry(_, state, leaderState)).unit
+  private def sendAppendEntries(state: ServerState, leaderState: LeaderState, timer: Timer): UIO[Timer] =
+    timer.restartHeartbeat.flatMap(newTimer => ZIO.foreachPar(otherNodes)(sendAppendEntry(_, state, leaderState)).as(newTimer))
 
   private def sendAppendEntry(otherNodeId: NodeId, state: ServerState, leaderState: LeaderState): UIO[Unit] = {
     // If last log index ≥ nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
