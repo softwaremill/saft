@@ -223,7 +223,7 @@ class Node(
           }
 
           val restartedTimerIfGranted = if (response.voteGranted) timer.restartElection else ZIO.succeed(timer)
-          restartedTimerIfGranted.flatMap(newTimer => respond(response) *> follower(state2, followerState, newTimer))
+          restartedTimerIfGranted.flatMap(newTimer => doRespond(response, respond) *> follower(state2, followerState, newTimer))
 
         case RequestReceived(ae: AppendEntries, respond) =>
           // Reply false if term < currentTerm (§5.1)
@@ -245,10 +245,12 @@ class Node(
             val state4 = state2.updateLastAppliedToCommit()
 
             timer.restartElection
-              .flatMap(newTimer => respond(response) *> follower(state4, followerState.copy(leaderId = Some(ae.leaderId)), newTimer))
+              .flatMap(newTimer =>
+                doRespond(response, respond) *> follower(state4, followerState.copy(leaderId = Some(ae.leaderId)), newTimer)
+              )
           }
 
-        case RequestReceived(_: NewEntry, respond) => respond(RedirectToLeaderResponse(followerState.leaderId))
+        case RequestReceived(_: NewEntry, respond) => doRespond(RedirectToLeaderResponse(followerState.leaderId), respond)
 
         // ignore
         case RequestReceived(_: RequestVoteResponse, _)   => ZIO.unit
@@ -260,9 +262,9 @@ class Node(
     // On conversion to candidate, start election: Increment currentTerm, Vote for self
     val state2 = state.incrementTerm(nodeId)
     // Reset election timer
-    timer.restartElection.flatMap(newTimer =>
+    ZIO.log(s"Became candidate (${state2.currentTerm})") *> timer.restartElection.flatMap(newTimer =>
       // Send RequestVote RPCs to all other servers
-      ZIO.foreachPar(otherNodes)(otherNodeId => send(otherNodeId, RequestVote(state2.currentTerm, nodeId, state2.lastEntryTerm))) *>
+      ZIO.foreachPar(otherNodes)(otherNodeId => doSend(otherNodeId, RequestVote(state2.currentTerm, nodeId, state2.lastEntryTerm))) *>
         candidate(state2, CandidateState(1), newTimer)
     )
   }
@@ -274,15 +276,20 @@ class Node(
         case Timeout => startCandidate(state, timer)
 
         case RequestReceived(_: RequestVote, respond) =>
-          respond(RequestVoteResponse(state.currentTerm, voteGranted = false)) *> candidate(state, candidateState, timer)
+          doRespond(RequestVoteResponse(state.currentTerm, voteGranted = false), respond) *> candidate(state, candidateState, timer)
 
         case r @ RequestReceived(ae: AppendEntries, respond) =>
           // If AppendEntries RPC received from new leader: convert to follower
           if state.currentTerm == ae.term
           then handleFollower(r, state, FollowerState(Some(ae.leaderId)), timer)
-          else respond(AppendEntriesResponse.to(nodeId, ae)(state.currentTerm, success = false)) *> candidate(state, candidateState, timer)
+          else
+            doRespond(AppendEntriesResponse.to(nodeId, ae)(state.currentTerm, success = false), respond) *> candidate(
+              state,
+              candidateState,
+              timer
+            )
 
-        case RequestReceived(_: NewEntry, respond) => respond(RedirectToLeaderResponse(None))
+        case RequestReceived(_: NewEntry, respond) => doRespond(RedirectToLeaderResponse(None), respond)
         case RequestReceived(RequestVoteResponse(_, voteGranted), _) if voteGranted =>
           val candidateState2 = candidateState.modify(_.receivedVotes).using(_ + 1)
           // If votes received from majority of servers: become leader
@@ -296,7 +303,7 @@ class Node(
       }
     }
 
-  private def startLeader(state: ServerState, timer: Timer): UIO[Unit] = {
+  private def startLeader(state: ServerState, timer: Timer): UIO[Unit] = ZIO.logAnnotate(StateLogAnnotation, "leader-start") {
     val leaderState = LeaderState(
       // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
       otherNodes.map(_ -> state.lastEntryTerm.map(_.index).fold(LogIndex(0))(i => LogIndex(i + 1))).toMap,
@@ -306,7 +313,9 @@ class Node(
     )
 
     // Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server
-    sendAppendEntries(state, leaderState, timer).flatMap(newTimer => leader(state, leaderState, newTimer))
+    ZIO.log(s"Became leader (${state.currentTerm})") *> sendAppendEntries(state, leaderState, timer).flatMap(newTimer =>
+      leader(state, leaderState, newTimer)
+    )
   }
 
   private def leader(state: ServerState, leaderState: LeaderState, timer: Timer): UIO[Unit] =
@@ -319,7 +328,7 @@ class Node(
         // If command received from client: append entry to local log
         case RequestReceived(NewEntry(value), respond) =>
           val state2 = state.appendEntry(LogEntry(value, state.currentTerm))
-          val leaderState2 = leaderState.addAwaitingResponse(LogIndex(state.log.length - 1), respond(NewEntryAddedResponse))
+          val leaderState2 = leaderState.addAwaitingResponse(LogIndex(state.log.length - 1), doRespond(NewEntryAddedResponse, respond))
           sendAppendEntries(state2, leaderState2, timer).flatMap(leader(state2, leaderState2, _))
 
         // If successful: update nextIndex and matchIndex for follower (§5.3)
@@ -362,7 +371,7 @@ class Node(
         val prev = LogIndex(nextIndex - 1)
         Some(LogIndexTerm(state.log(prev).term, prev))
 
-    send(otherNodeId, AppendEntries(state.currentTerm, nodeId, prevEntry, state.log.drop(nextIndex), state.commitIndex))
+    doSend(otherNodeId, AppendEntries(state.currentTerm, nodeId, prevEntry, state.log.drop(nextIndex), state.commitIndex))
   }
 
   private def nextEvent(state: ServerState, timer: Timer)(next: ServerEvent => UIO[Unit]): UIO[Unit] =
@@ -372,6 +381,9 @@ class Node(
         timer.restartElection.flatMap(newTimer => handleFollower(e, state.updateTerm(msg.term), FollowerState(None), newTimer))
       case e => next(e)
     }
+
+  private def doSend(to: NodeId, msg: ToServerMessage): UIO[Unit] = ZIO.log(s"Send to ${to.id}: $msg") *> send(to, msg)
+  private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.log(s"Response: $msg") *> respond(msg)
 }
 
 object Saft extends ZIOAppDefault with Logging {
@@ -383,7 +395,7 @@ object Saft extends ZIOAppDefault with Logging {
 
     val nodes = (1 to numberOfNodes).map(i => NodeId(s"node$i"))
     for {
-      eventQueues <- ZIO.foreach(nodes)(nodeId => Queue.unbounded[ServerEvent].map(addLogging).map(nodeId -> _)).map(_.toMap)
+      eventQueues <- ZIO.foreach(nodes)(nodeId => Queue.unbounded[ServerEvent].map(nodeId -> _)).map(_.toMap)
       stateMachines <- ZIO
         .foreach(nodes)(nodeId => StateMachine(logEntry => Console.printLine(s"[$nodeId] APPLY: $logEntry").orDie).map(nodeId -> _))
         .map(_.toMap)
@@ -416,26 +428,4 @@ object Saft extends ZIOAppDefault with Logging {
       _ <- ZIO.log("Bye!")
     } yield ()
   }
-
-  private def addLogging(queue: Queue[ServerEvent]): Queue[ServerEvent] = new Queue[ServerEvent]:
-    override def awaitShutdown(implicit trace: Trace): UIO[Unit] = queue.awaitShutdown
-    override def capacity: Int = queue.capacity
-    override def isShutdown(implicit trace: Trace): UIO[Boolean] = queue.isShutdown
-    override def offer(a: ServerEvent)(implicit trace: Trace): UIO[Boolean] = queue.offer(a)
-    override def offerAll[A1 <: ServerEvent](as: Iterable[A1])(implicit trace: Trace): UIO[Chunk[A1]] = queue.offerAll(as)
-    override def shutdown(implicit trace: Trace): UIO[Unit] = queue.shutdown
-    override def size(implicit trace: Trace): UIO[Int] = queue.size
-
-    override def take(implicit trace: Trace): UIO[ServerEvent] = queue.take.flatMap(log)
-    override def takeAll(implicit trace: Trace): UIO[Chunk[ServerEvent]] = queue.takeAll.flatMap(ses => ZIO.foreach(ses)(log))
-    override def takeUpTo(max: Int)(implicit trace: Trace): UIO[Chunk[ServerEvent]] =
-      queue.takeUpTo(max).flatMap(ses => ZIO.foreach(ses)(log))
-
-    private def log(se: ServerEvent): UIO[ServerEvent] = se match
-      case Timeout => ZIO.log("Timeout").as(se)
-      case RequestReceived(message, respond) =>
-        ZIO.log(s"Request: $message").as {
-          RequestReceived(message, response => ZIO.log(s"Response: $response (for: $message)") *> respond(response))
-        }
-
 }

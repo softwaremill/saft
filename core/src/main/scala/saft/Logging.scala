@@ -26,6 +26,6 @@ trait Logging { this: ZIOAppDefault =>
       }
     }
 
-  override val bootstrap: ZLayer[Any, Nothing, Unit] = Runtime.removeDefaultLoggers >>> console(logFormat, LogLevel.Debug)
+  override val bootstrap: ZLayer[Any, Nothing, Unit] = Runtime.removeDefaultLoggers >>> console(logFormat, LogLevel.Info)
 
 }
