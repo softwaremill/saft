@@ -393,11 +393,11 @@ object Saft extends ZIOAppDefault with Logging {
     val heartbeatTimeoutDuration = Duration.fromMillis(500)
     val electionRandomization = 500
 
-    val nodes = (1 to numberOfNodes).map(i => NodeId(s"node$i"))
+    val nodeIds = (1 to numberOfNodes).map(i => NodeId(s"node$i"))
     for {
-      eventQueues <- ZIO.foreach(nodes)(nodeId => Queue.unbounded[ServerEvent].map(nodeId -> _)).map(_.toMap)
+      eventQueues <- ZIO.foreach(nodeIds)(nodeId => Queue.unbounded[ServerEvent].map(nodeId -> _)).map(_.toMap)
       stateMachines <- ZIO
-        .foreach(nodes)(nodeId => StateMachine(logEntry => ZIO.log(s"[$nodeId] Apply: $logEntry")).map(nodeId -> _))
+        .foreach(nodeIds)(nodeId => StateMachine(logEntry => ZIO.log(s"[$nodeId] Apply: $logEntry")).map(nodeId -> _))
         .map(_.toMap)
       send = {
         def doSend(nodeId: NodeId)(toNodeId: NodeId, msg: ToServerMessage): UIO[Unit] =
@@ -418,10 +418,12 @@ object Saft extends ZIOAppDefault with Logging {
         .flatMap(_.nextIntBounded(electionRandomization))
         .flatMap(randomization => ZIO.sleep(electionTimeoutDuration.plusMillis(randomization)))
       heartbeatTimeout = ZIO.sleep(heartbeatTimeoutDuration)
-      initial = nodes.map(nodeId =>
-        new Node(nodeId, eventQueues(nodeId), send(nodeId), stateMachines(nodeId), nodes.toSet, electionTimeout, heartbeatTimeout)
+      nodes = nodeIds.toList.map(nodeId =>
+        new Node(nodeId, eventQueues(nodeId), send(nodeId), stateMachines(nodeId), nodeIds.toSet, electionTimeout, heartbeatTimeout)
       )
-      fibers <- ZIO.foreach(initial)(_.start(ServerState(Vector.empty, None, Term(0), None, None)).fork)
+      fibers <- ZIO.foreach(nodes)(n =>
+        n.start(ServerState(Vector.empty, None, Term(0), None, None)).onExit(_ => ZIO.log("Node fiber done")).fork
+      )
       _ <- ZIO.log(s"$numberOfNodes nodes started. Press any key to exit.")
       _ <- Console.readLine
       _ <- ZIO.foreach(fibers)(f => f.interrupt *> f.join)
