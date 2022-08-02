@@ -426,7 +426,7 @@ object Saft extends ZIOAppDefault with Logging {
       )
       _ <- ZIO.log(s"$numberOfNodes nodes started. Press any key to exit.")
       _ <- Console.readLine
-      _ <- ZIO.foreach(fibers)(f => f.interrupt *> f.join)
+      _ <- ZIO.foreach(fibers)(f => f.interrupt)
       _ <- ZIO.log("Bye!")
     } yield ()
   }
