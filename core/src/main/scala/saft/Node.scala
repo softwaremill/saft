@@ -194,19 +194,16 @@ class Node(
   private val otherNodes = nodes - nodeId
   private val majority = math.ceil(nodes.size.toDouble / 2).toInt
 
-  def start(state: ServerState): UIO[Unit] = ZIO.logAnnotate(NodeIdLogAnnotation, nodeId.id) {
-    Timer(electionTimeout, heartbeatTimeout, events)
+  def start(state: ServerState): UIO[Unit] =
+    setLogAnnotation(NodeIdLogAnnotation, nodeId.id) *> Timer(electionTimeout, heartbeatTimeout, events)
       .flatMap(_.restartElection)
       .flatMap(timer => follower(state, FollowerState(None), timer))
-  }
 
   private def follower(state: ServerState, followerState: FollowerState, timer: Timer): UIO[Unit] =
-    ZIO.logAnnotate(StateLogAnnotation, "follower") {
-      nextEvent(state, timer)(handleFollower(_, state, followerState, timer))
-    }
+    setLogAnnotation(StateLogAnnotation, "follower") *> nextEvent(state, timer)(handleFollower(_, state, followerState, timer))
 
   private def handleFollower(event: ServerEvent, state: ServerState, followerState: FollowerState, timer: Timer): UIO[Unit] =
-    ZIO.logAnnotate(StateLogAnnotation, "follower") {
+    setLogAnnotation(StateLogAnnotation, "follower") *> {
       event match {
         // If election timeout elapses without receiving AppendEntries RPC from current leader or granting vote to candidate: convert to candidate
         case Timeout => startCandidate(state, timer)
@@ -258,7 +255,7 @@ class Node(
       }
     }
 
-  private def startCandidate(state: ServerState, timer: Timer): UIO[Unit] = ZIO.logAnnotate(StateLogAnnotation, "candidate-start") {
+  private def startCandidate(state: ServerState, timer: Timer): UIO[Unit] = setLogAnnotation(StateLogAnnotation, "candidate-start") *> {
     // On conversion to candidate, start election: Increment currentTerm, Vote for self
     val state2 = state.incrementTerm(nodeId)
     // Reset election timer
@@ -270,40 +267,38 @@ class Node(
   }
 
   private def candidate(state: ServerState, candidateState: CandidateState, timer: Timer): UIO[Unit] =
-    ZIO.logAnnotate(StateLogAnnotation, "candidate") {
-      nextEvent(state, timer) {
-        // If election timeout elapses: start new election
-        case Timeout => startCandidate(state, timer)
+    setLogAnnotation(StateLogAnnotation, "candidate") *> nextEvent(state, timer) {
+      // If election timeout elapses: start new election
+      case Timeout => startCandidate(state, timer)
 
-        case RequestReceived(_: RequestVote, respond) =>
-          doRespond(RequestVoteResponse(state.currentTerm, voteGranted = false), respond) *> candidate(state, candidateState, timer)
+      case RequestReceived(_: RequestVote, respond) =>
+        doRespond(RequestVoteResponse(state.currentTerm, voteGranted = false), respond) *> candidate(state, candidateState, timer)
 
-        case r @ RequestReceived(ae: AppendEntries, respond) =>
-          // If AppendEntries RPC received from new leader: convert to follower
-          if state.currentTerm == ae.term
-          then handleFollower(r, state, FollowerState(Some(ae.leaderId)), timer)
-          else
-            doRespond(AppendEntriesResponse.to(nodeId, ae)(state.currentTerm, success = false), respond) *> candidate(
-              state,
-              candidateState,
-              timer
-            )
+      case r @ RequestReceived(ae: AppendEntries, respond) =>
+        // If AppendEntries RPC received from new leader: convert to follower
+        if state.currentTerm == ae.term
+        then handleFollower(r, state, FollowerState(Some(ae.leaderId)), timer)
+        else
+          doRespond(AppendEntriesResponse.to(nodeId, ae)(state.currentTerm, success = false), respond) *> candidate(
+            state,
+            candidateState,
+            timer
+          )
 
-        case RequestReceived(_: NewEntry, respond) => doRespond(RedirectToLeaderResponse(None), respond)
-        case RequestReceived(RequestVoteResponse(_, voteGranted), _) if voteGranted =>
-          val candidateState2 = candidateState.modify(_.receivedVotes).using(_ + 1)
-          // If votes received from majority of servers: become leader
-          if candidateState2.receivedVotes > majority
-          then startLeader(state, timer)
-          else candidate(state, candidateState2, timer)
-        case RequestReceived(_: RequestVoteResponse, _) => candidate(state, candidateState, timer)
+      case RequestReceived(_: NewEntry, respond) => doRespond(RedirectToLeaderResponse(None), respond)
+      case RequestReceived(RequestVoteResponse(_, voteGranted), _) if voteGranted =>
+        val candidateState2 = candidateState.modify(_.receivedVotes).using(_ + 1)
+        // If votes received from majority of servers: become leader
+        if candidateState2.receivedVotes > majority
+        then startLeader(state, timer)
+        else candidate(state, candidateState2, timer)
+      case RequestReceived(_: RequestVoteResponse, _) => candidate(state, candidateState, timer)
 
-        // ignore
-        case RequestReceived(_: AppendEntriesResponse, _) => candidate(state, candidateState, timer)
-      }
+      // ignore
+      case RequestReceived(_: AppendEntriesResponse, _) => candidate(state, candidateState, timer)
     }
 
-  private def startLeader(state: ServerState, timer: Timer): UIO[Unit] = ZIO.logAnnotate(StateLogAnnotation, "leader-start") {
+  private def startLeader(state: ServerState, timer: Timer): UIO[Unit] = setLogAnnotation(StateLogAnnotation, "leader-start") *> {
     val leaderState = LeaderState(
       // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
       otherNodes.map(_ -> state.lastEntryTerm.map(_.index).fold(LogIndex(0))(i => LogIndex(i + 1))).toMap,
@@ -319,44 +314,42 @@ class Node(
   }
 
   private def leader(state: ServerState, leaderState: LeaderState, timer: Timer): UIO[Unit] =
-    ZIO.logAnnotate(StateLogAnnotation, "leader") {
-      nextEvent(state, timer) {
-        // repeat during idle periods to prevent election timeouts (§5.2)
-        case Timeout =>
-          sendAppendEntries(state, leaderState, timer).flatMap(newTimer => leader(state, leaderState, newTimer))
+    setLogAnnotation(StateLogAnnotation, "leader") *> nextEvent(state, timer) {
+      // repeat during idle periods to prevent election timeouts (§5.2)
+      case Timeout =>
+        sendAppendEntries(state, leaderState, timer).flatMap(newTimer => leader(state, leaderState, newTimer))
 
-        // If command received from client: append entry to local log
-        case RequestReceived(NewEntry(value), respond) =>
-          val state2 = state.appendEntry(LogEntry(value, state.currentTerm))
-          val leaderState2 = leaderState.addAwaitingResponse(LogIndex(state.log.length - 1), doRespond(NewEntryAddedResponse, respond))
-          sendAppendEntries(state2, leaderState2, timer).flatMap(leader(state2, leaderState2, _))
+      // If command received from client: append entry to local log
+      case RequestReceived(NewEntry(value), respond) =>
+        val state2 = state.appendEntry(LogEntry(value, state.currentTerm))
+        val leaderState2 = leaderState.addAwaitingResponse(LogIndex(state.log.length - 1), doRespond(NewEntryAddedResponse, respond))
+        sendAppendEntries(state2, leaderState2, timer).flatMap(leader(state2, leaderState2, _))
 
-        // If successful: update nextIndex and matchIndex for follower (§5.3)
-        case RequestReceived(AppendEntriesResponse(_, true, followerId, range), _) =>
-          val leaderState2 = leaderState.appendSuccessful(followerId, range.map(_._2))
-          // If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
-          val newCommitIndex = leaderState.commitIndex(if state.log.isEmpty then None else Some(LogIndex(state.log.length - 1)), majority)
-          if state.commitIndex != newCommitIndex
-          then
-            val state2 = state.modify(_.commitIndex).setTo(newCommitIndex)
-            val (leaderState3, responses) = newCommitIndex match
-              case None     => (leaderState2, Vector.empty)
-              case Some(ci) => leaderState2.removeAwaitingResponses(ci)
+      // If successful: update nextIndex and matchIndex for follower (§5.3)
+      case RequestReceived(AppendEntriesResponse(_, true, followerId, range), _) =>
+        val leaderState2 = leaderState.appendSuccessful(followerId, range.map(_._2))
+        // If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
+        val newCommitIndex = leaderState.commitIndex(if state.log.isEmpty then None else Some(LogIndex(state.log.length - 1)), majority)
+        if state.commitIndex != newCommitIndex
+        then
+          val state2 = state.modify(_.commitIndex).setTo(newCommitIndex)
+          val (leaderState3, responses) = newCommitIndex match
+            case None     => (leaderState2, Vector.empty)
+            case Some(ci) => leaderState2.removeAwaitingResponses(ci)
 
-            // respond after entry applied to state machine (§5.3)
-            ZIO.foreachPar(responses)(identity) *> sendAppendEntries(state2, leaderState3, timer).flatMap(leader(state2, leaderState3, _))
-          else leader(state, leaderState2, timer)
+          // respond after entry applied to state machine (§5.3)
+          ZIO.foreachPar(responses)(identity) *> sendAppendEntries(state2, leaderState3, timer).flatMap(leader(state2, leaderState3, _))
+        else leader(state, leaderState2, timer)
 
-        // If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
-        case RequestReceived(AppendEntriesResponse(_, false, followerId, range), _) =>
-          val leaderState2 = leaderState.appendFailed(followerId, range.map(_._1))
-          sendAppendEntry(followerId, state, leaderState2) *> leader(state, leaderState2, timer)
+      // If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
+      case RequestReceived(AppendEntriesResponse(_, false, followerId, range), _) =>
+        val leaderState2 = leaderState.appendFailed(followerId, range.map(_._1))
+        sendAppendEntry(followerId, state, leaderState2) *> leader(state, leaderState2, timer)
 
-        // ignore
-        case RequestReceived(_: RequestVote, _)         => leader(state, leaderState, timer)
-        case RequestReceived(_: RequestVoteResponse, _) => leader(state, leaderState, timer)
-        case RequestReceived(_: AppendEntries, _)       => leader(state, leaderState, timer)
-      }
+      // ignore
+      case RequestReceived(_: RequestVote, _)         => leader(state, leaderState, timer)
+      case RequestReceived(_: RequestVoteResponse, _) => leader(state, leaderState, timer)
+      case RequestReceived(_: AppendEntries, _)       => leader(state, leaderState, timer)
     }
 
   private def sendAppendEntries(state: ServerState, leaderState: LeaderState, timer: Timer): UIO[Timer] =
