@@ -253,8 +253,8 @@ class Node(
         case RequestReceived(_: NewEntry, respond) => doRespond(RedirectToLeaderResponse(followerState.leaderId), respond)
 
         // ignore
-        case RequestReceived(_: RequestVoteResponse, _)   => ZIO.unit
-        case RequestReceived(_: AppendEntriesResponse, _) => ZIO.unit
+        case RequestReceived(_: RequestVoteResponse, _)   => follower(state, followerState, timer)
+        case RequestReceived(_: AppendEntriesResponse, _) => follower(state, followerState, timer)
       }
     }
 
@@ -296,10 +296,10 @@ class Node(
           if candidateState2.receivedVotes > majority
           then startLeader(state, timer)
           else candidate(state, candidateState2, timer)
-        case RequestReceived(_: RequestVoteResponse, _) => ZIO.unit
+        case RequestReceived(_: RequestVoteResponse, _) => candidate(state, candidateState, timer)
 
         // ignore
-        case RequestReceived(_: AppendEntriesResponse, _) => ZIO.unit
+        case RequestReceived(_: AppendEntriesResponse, _) => candidate(state, candidateState, timer)
       }
     }
 
@@ -353,9 +353,9 @@ class Node(
           sendAppendEntry(followerId, state, leaderState2) *> leader(state, leaderState2, timer)
 
         // ignore
-        case RequestReceived(_: RequestVote, _)         => ZIO.unit
-        case RequestReceived(_: RequestVoteResponse, _) => ZIO.unit
-        case RequestReceived(_: AppendEntries, _)       => ZIO.unit
+        case RequestReceived(_: RequestVote, _)         => leader(state, leaderState, timer)
+        case RequestReceived(_: RequestVoteResponse, _) => leader(state, leaderState, timer)
+        case RequestReceived(_: AppendEntries, _)       => leader(state, leaderState, timer)
       }
     }
 
@@ -378,7 +378,7 @@ class Node(
     events.take.flatMap {
       // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
       case e @ RequestReceived(msg: FromServerMessage, _) if msg.term > state.currentTerm =>
-        timer.restartElection.flatMap(newTimer => handleFollower(e, state.updateTerm(msg.term), FollowerState(None), newTimer))
+        timer.restartElection.flatMap(handleFollower(e, state.updateTerm(msg.term), FollowerState(None), _))
       case e => next(e)
     }
 
@@ -390,7 +390,7 @@ object Saft extends ZIOAppDefault with Logging {
   def run: Task[Unit] = {
     val numberOfNodes = 5
     val electionTimeoutDuration = Duration.fromMillis(2000)
-    val heartbeatTimeoutDuration = Duration.fromMillis(1000)
+    val heartbeatTimeoutDuration = Duration.fromMillis(500)
     val electionRandomization = 500
 
     val nodes = (1 to numberOfNodes).map(i => NodeId(s"node$i"))
