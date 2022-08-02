@@ -382,8 +382,8 @@ class Node(
       case e => next(e)
     }
 
-  private def doSend(to: NodeId, msg: ToServerMessage): UIO[Unit] = ZIO.log(s"Send to ${to.id}: $msg") *> send(to, msg)
-  private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.log(s"Response: $msg") *> respond(msg)
+  private def doSend(to: NodeId, msg: ToServerMessage): UIO[Unit] = ZIO.logDebug(s"Send to ${to.id}: $msg") *> send(to, msg)
+  private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.logDebug(s"Response: $msg") *> respond(msg)
 }
 
 object Saft extends ZIOAppDefault with Logging {
@@ -397,7 +397,7 @@ object Saft extends ZIOAppDefault with Logging {
     for {
       eventQueues <- ZIO.foreach(nodes)(nodeId => Queue.unbounded[ServerEvent].map(nodeId -> _)).map(_.toMap)
       stateMachines <- ZIO
-        .foreach(nodes)(nodeId => StateMachine(logEntry => Console.printLine(s"[$nodeId] APPLY: $logEntry").orDie).map(nodeId -> _))
+        .foreach(nodes)(nodeId => StateMachine(logEntry => ZIO.log(s"[$nodeId] Apply: $logEntry")).map(nodeId -> _))
         .map(_.toMap)
       send = {
         def doSend(nodeId: NodeId)(toNodeId: NodeId, msg: ToServerMessage): UIO[Unit] =
