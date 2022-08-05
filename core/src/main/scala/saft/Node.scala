@@ -461,47 +461,49 @@ object Saft extends ZIOAppDefault with Logging {
           )
         )
         .toMap
-      fibers <- ZIO.foreach(nodes)((nodeId, node) => node.start.fork.map(nodeId -> _))
-      _ <- ZIO.log(s"$numberOfNodes nodes started.")
       _ <- ZIO.log("E - exit; Nn data - send new entry <data> to node <n>; Kn - kill node n; Sn - start node n")
-      _ <- run(fibers, nodes, eventQueues)
+      _ <- run(nodes, eventQueues)
     } yield ()
   }
 
   private def nodeIdWithIndex(i: Int): NodeId = NodeId(s"node$i")
 
-  private val newEntryPattern = "N(\\d+) (.+)".r
-  private val killPattern = "K(\\d+)".r
-  private val startPattern = "S(\\d+)".r
-
   private def run(
-      fibers: Map[NodeId, Fiber.Runtime[Nothing, Unit]],
       nodes: Map[NodeId, Node],
       queues: Map[NodeId, Queue[ServerEvent]]
-  ): IO[IOException, Unit] = Console.readLine.flatMap {
-    case "E" => ZIO.foreach(fibers.values)(f => f.interrupt) *> ZIO.log("Bye!")
+  ): IO[IOException, Unit] =
+    val newEntryPattern = "N(\\d+) (.+)".r
+    val killPattern = "K(\\d+)".r
+    val startPattern = "S(\\d+)".r
 
-    case newEntryPattern(nodeNumber, newEntry) =>
-      val nodeId = nodeIdWithIndex(nodeNumber.toInt)
-      queues.get(nodeId) match
-        case None => ZIO.log(s"Unknown node: $nodeNumber") *> run(fibers, nodes, queues)
-        case Some(queue) =>
-          queue.offer(RequestReceived(NewEntry(newEntry), responseMessage => ZIO.log(s"Response: $responseMessage"))).unit *>
-            run(fibers, nodes, queues)
+    def doRun(fibers: Map[NodeId, Fiber.Runtime[Nothing, Unit]]): IO[IOException, Unit] =
+      Console.readLine.flatMap {
+        case "E" => ZIO.foreach(fibers.values)(f => f.interrupt) *> ZIO.log("Bye!")
 
-    case killPattern(nodeNumber) =>
-      val nodeId = nodeIdWithIndex(nodeNumber.toInt)
-      fibers.get(nodeId) match
-        case None        => ZIO.log(s"Node $nodeNumber is not started") *> run(fibers, nodes, queues)
-        case Some(fiber) => fiber.interrupt *> run(fibers.removed(nodeId), nodes, queues)
+        case newEntryPattern(nodeNumber, newEntry) =>
+          val nodeId = nodeIdWithIndex(nodeNumber.toInt)
+          queues.get(nodeId) match
+            case None => ZIO.log(s"Unknown node: $nodeNumber") *> doRun(fibers)
+            case Some(queue) =>
+              queue.offer(RequestReceived(NewEntry(newEntry), responseMessage => ZIO.log(s"Response: $responseMessage"))).unit *> doRun(
+                fibers
+              )
 
-    case startPattern(nodeNumber) =>
-      val nodeId = nodeIdWithIndex(nodeNumber.toInt)
-      (fibers.get(nodeId), nodes.get(nodeId)) match
-        case (None, Some(node)) => node.start.fork.flatMap(fiber => run(fibers + (nodeId -> fiber), nodes, queues))
-        case (_, None)          => ZIO.log(s"Unknown node: $nodeNumber") *> run(fibers, nodes, queues)
-        case (Some(_), Some(_)) => ZIO.log(s"Node $nodeNumber is already started") *> run(fibers, nodes, queues)
+        case killPattern(nodeNumber) =>
+          val nodeId = nodeIdWithIndex(nodeNumber.toInt)
+          fibers.get(nodeId) match
+            case None        => ZIO.log(s"Node $nodeNumber is not started") *> doRun(fibers)
+            case Some(fiber) => fiber.interrupt *> doRun(fibers.removed(nodeId))
 
-    case _ => ZIO.log("Unknown command") *> run(fibers, nodes, queues)
-  }
+        case startPattern(nodeNumber) =>
+          val nodeId = nodeIdWithIndex(nodeNumber.toInt)
+          (fibers.get(nodeId), nodes.get(nodeId)) match
+            case (None, Some(node)) => node.start.fork.flatMap(fiber => doRun(fibers + (nodeId -> fiber)))
+            case (_, None)          => ZIO.log(s"Unknown node: $nodeNumber") *> doRun(fibers)
+            case (Some(_), Some(_)) => ZIO.log(s"Node $nodeNumber is already started") *> doRun(fibers)
+
+        case _ => ZIO.log("Unknown command") *> doRun(fibers)
+      }
+
+    ZIO.foreach(nodes)((nodeId, node) => node.start.fork.map(nodeId -> _)).flatMap(doRun)
 }
