@@ -70,6 +70,8 @@ case class ServerState(
 
   def incrementTerm(self: NodeId): ServerState = copy(currentTerm = Term(currentTerm + 1), votedFor = Some(self))
 
+  def voteFor(other: NodeId): ServerState = copy(votedFor = Some(other))
+
   def lastEntryTerm: Option[LogIndexTerm] = log.lastOption.map(lastLogEntry => LogIndexTerm(lastLogEntry.term, LogIndex(log.length - 1)))
 
   def votedForOtherThan(candidateId: NodeId): Boolean = votedFor.nonEmpty && !votedFor.contains(candidateId)
@@ -104,6 +106,9 @@ case class ServerState(
     case (Some(la), None)     => throw new IllegalStateException(s"Last applied is set to $la, but no commit index is set")
   }
 }
+
+object ServerState:
+  val Initial: ServerState = ServerState(Vector.empty, None, Term(0), None, None)
 
 // the extra awaitingResponse is needed to properly reply to NewEntry requests once entries are replicated
 case class LeaderState(
@@ -140,7 +145,9 @@ case class LeaderState(
     val (doneWaiting, stillAwaiting) = awaitingResponses.span(_._1 <= upToIndex)
     (copy(awaitingResponses = stillAwaiting), doneWaiting.map(_._2))
 
-case class FollowerState(leaderId: Option[NodeId])
+case class FollowerState(leaderId: Option[NodeId]) {
+  def leaderId(other: NodeId): FollowerState = copy(leaderId = Some(other))
+}
 case class CandidateState(receivedVotes: Int)
 
 //
@@ -182,6 +189,12 @@ object StateMachine:
 
 //
 
+trait Persistence:
+  def apply(oldState: ServerState, newState: ServerState): UIO[Unit]
+  def get: UIO[ServerState]
+
+//
+
 class Node(
     nodeId: NodeId,
     events: Queue[ServerEvent],
@@ -189,15 +202,16 @@ class Node(
     stateMachine: StateMachine,
     nodes: Set[NodeId],
     electionTimeout: UIO[Unit],
-    heartbeatTimeout: UIO[Unit]
+    heartbeatTimeout: UIO[Unit],
+    persistence: Persistence
 ) {
   private val otherNodes = nodes - nodeId
   private val majority = math.ceil(nodes.size.toDouble / 2).toInt
 
-  def start(state: ServerState): UIO[Unit] =
+  def start: UIO[Unit] =
     setLogAnnotation(NodeIdLogAnnotation, nodeId.id) *> Timer(electionTimeout, heartbeatTimeout, events)
       .flatMap(_.restartElection)
-      .flatMap(timer => follower(state, FollowerState(None), timer))
+      .flatMap(timer => persistence.get.flatMap(state => follower(state, FollowerState(None), timer)))
 
   private def follower(state: ServerState, followerState: FollowerState, timer: Timer): UIO[Unit] =
     setLogAnnotation(StateLogAnnotation, "follower") *> nextEvent(state, timer)(handleFollower(_, state, followerState, timer))
@@ -209,42 +223,42 @@ class Node(
         case Timeout => startCandidate(state, timer)
 
         case RequestReceived(rv: RequestVote, respond) =>
-          val (response, state2) = {
-            // Reply false if term < currentTerm
-            // If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
-            if ((rv.term < state.currentTerm) || state.votedForOtherThan(rv.candidateId) || state.hasEntriesAfter(rv.lastLog)) {
-              (RequestVoteResponse(state.currentTerm, voteGranted = false), state)
-            } else {
-              (RequestVoteResponse(state.currentTerm, voteGranted = true), state.copy(votedFor = Some(rv.candidateId)))
-            }
-          }
-
-          val restartedTimerIfGranted = if (response.voteGranted) timer.restartElection else ZIO.succeed(timer)
-          restartedTimerIfGranted.flatMap(newTimer => doRespond(response, respond) *> follower(state2, followerState, newTimer))
-
-        case RequestReceived(ae: AppendEntries, respond) =>
-          // Reply false if term < currentTerm (§5.1)
-          // Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-          val (response, state2) = if (ae.term < state.currentTerm || !state.hasEntryAtTerm(ae.prevLog)) {
-            (AppendEntriesResponse.to(nodeId, ae)(state.currentTerm, success = false), state)
+          // Reply false if term < currentTerm
+          // If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
+          if ((rv.term < state.currentTerm) || state.votedForOtherThan(rv.candidateId) || state.hasEntriesAfter(rv.lastLog)) {
+            doRespond(RequestVoteResponse(state.currentTerm, voteGranted = false), respond) *>
+              follower(state, followerState, timer)
           } else {
-            // If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
-            // Append any new entries not already in the log
-            (
-              AppendEntriesResponse.to(nodeId, ae)(state.currentTerm, success = true),
-              state.appendEntries(ae.entries, ae.prevLog.map(_.index)).updateCommitIndex(ae.leaderCommit)
+            val state2 = state.voteFor(rv.candidateId)
+            timer.restartElection.flatMap(timer2 =>
+              persistence(state, state2) *>
+                doRespond(RequestVoteResponse(state2.currentTerm, voteGranted = true), respond) *>
+                follower(state2, followerState, timer2)
             )
           }
 
-          // If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
-          ZIO.foreach(state2.indexesToApply)(i => stateMachine(state2.log(i))).flatMap { _ =>
-            // If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-            val state4 = state2.updateLastAppliedToCommit()
+        case RequestReceived(ae: AppendEntries, respond) =>
+          val followerState2 = followerState.leaderId(ae.leaderId)
 
-            timer.restartElection
-              .flatMap(newTimer =>
-                doRespond(response, respond) *> follower(state4, followerState.copy(leaderId = Some(ae.leaderId)), newTimer)
-              )
+          // Reply false if term < currentTerm (§5.1)
+          // Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+          if (ae.term < state.currentTerm || !state.hasEntryAtTerm(ae.prevLog)) {
+            val response = AppendEntriesResponse.to(nodeId, ae)(state.currentTerm, success = false)
+            timer.restartElection.flatMap(timer2 => doRespond(response, respond) *> follower(state, followerState2, timer2))
+          } else {
+            // If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
+            // Append any new entries not already in the log
+            val state2 = state.appendEntries(ae.entries, ae.prevLog.map(_.index)).updateCommitIndex(ae.leaderCommit)
+            val response = AppendEntriesResponse.to(nodeId, ae)(state2.currentTerm, success = true)
+
+            // If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
+            timer.restartElection.flatMap { timer2 =>
+              ZIO.foreach(state2.indexesToApply)(i => stateMachine(state2.log(i))).flatMap { _ =>
+                // If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+                val state3 = state2.updateLastAppliedToCommit()
+                persistence(state, state3) *> doRespond(response, respond) *> follower(state3, followerState2, timer2)
+              }
+            }
           }
 
         case RequestReceived(_: NewEntry, respond) => doRespond(RedirectToLeaderResponse(followerState.leaderId), respond)
@@ -259,10 +273,11 @@ class Node(
     // On conversion to candidate, start election: Increment currentTerm, Vote for self
     val state2 = state.incrementTerm(nodeId)
     // Reset election timer
-    ZIO.log(s"Became candidate (${state2.currentTerm})") *> timer.restartElection.flatMap(newTimer =>
-      // Send RequestVote RPCs to all other servers
-      ZIO.foreachPar(otherNodes)(otherNodeId => doSend(otherNodeId, RequestVote(state2.currentTerm, nodeId, state2.lastEntryTerm))) *>
-        candidate(state2, CandidateState(1), newTimer)
+    ZIO.log(s"Became candidate (${state2.currentTerm})") *> timer.restartElection.flatMap(timer2 =>
+      persistence(state, state2) *>
+        // Send RequestVote RPCs to all other servers
+        ZIO.foreachPar(otherNodes)(otherNodeId => doSend(otherNodeId, RequestVote(state2.currentTerm, nodeId, state2.lastEntryTerm))) *>
+        candidate(state2, CandidateState(1), timer2)
     )
   }
 
@@ -371,12 +386,27 @@ class Node(
     events.take.flatMap {
       // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
       case e @ RequestReceived(msg: FromServerMessage, _) if msg.term > state.currentTerm =>
-        timer.restartElection.flatMap(handleFollower(e, state.updateTerm(msg.term), FollowerState(None), _))
+        val state2 = state.updateTerm(msg.term)
+        timer.restartElection.flatMap(timer2 => persistence(state, state2) *> handleFollower(e, state2, FollowerState(None), timer2))
       case e => next(e)
     }
 
   private def doSend(to: NodeId, msg: ToServerMessage): UIO[Unit] = ZIO.logDebug(s"Send to ${to.id}: $msg") *> send(to, msg)
   private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.logDebug(s"Response: $msg") *> respond(msg)
+}
+
+class InMemoryPersistence(refs: Map[NodeId, Ref[ServerState]]) {
+  def forNodeId(nodeId: NodeId): Persistence = new Persistence {
+    private val ref = refs(nodeId)
+    override def apply(oldState: ServerState, newState: ServerState): UIO[Unit] =
+      ref.set(newState.copy(commitIndex = None, lastApplied = None))
+    override def get: UIO[ServerState] = ref.get
+  }
+}
+
+object InMemoryPersistence {
+  def apply(nodeIds: Seq[NodeId]): UIO[InMemoryPersistence] =
+    ZIO.foreach(nodeIds.toList)(nodeId => Ref.make(ServerState.Initial).map(nodeId -> _)).map(_.toMap).map(new InMemoryPersistence(_))
 }
 
 object Saft extends ZIOAppDefault with Logging {
@@ -411,12 +441,20 @@ object Saft extends ZIOAppDefault with Logging {
         .flatMap(_.nextIntBounded(electionRandomization))
         .flatMap(randomization => ZIO.sleep(electionTimeoutDuration.plusMillis(randomization)))
       heartbeatTimeout = ZIO.sleep(heartbeatTimeoutDuration)
+      persistence <- InMemoryPersistence(nodeIds)
       nodes = nodeIds.toList.map(nodeId =>
-        new Node(nodeId, eventQueues(nodeId), send(nodeId), stateMachines(nodeId), nodeIds.toSet, electionTimeout, heartbeatTimeout)
+        new Node(
+          nodeId,
+          eventQueues(nodeId),
+          send(nodeId),
+          stateMachines(nodeId),
+          nodeIds.toSet,
+          electionTimeout,
+          heartbeatTimeout,
+          persistence.forNodeId(nodeId)
+        )
       )
-      fibers <- ZIO.foreach(nodes)(n =>
-        n.start(ServerState(Vector.empty, None, Term(0), None, None)).onExit(_ => ZIO.log("Node fiber done")).fork
-      )
+      fibers <- ZIO.foreach(nodes)(n => n.start.onExit(_ => ZIO.log("Node fiber done")).fork)
       _ <- ZIO.log(s"$numberOfNodes nodes started. Press any key to exit.")
       _ <- Console.readLine
       _ <- ZIO.foreach(fibers)(f => f.interrupt)
