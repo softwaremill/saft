@@ -15,7 +15,7 @@ def setLogAnnotation(key: String, value: String): UIO[Unit] = FiberRef.currentLo
 trait Logging { this: ZIOAppDefault =>
   private val logFormat = timestamp(DateTimeFormatter.ofLocalizedDateTime(FormatStyle.LONG)).fixed(32).color(LogColor.BLUE) |-|
     (text("[") + level + text("]")).color(LogColor.GREEN) |-|
-    fiberId.color(LogColor.WHITE) |-|
+    fiberId.color(LogColor.WHITE).fixed(14) |-|
     annotationValue(NodeIdLogAnnotation).color(LogColor.RED) |-|
     annotation(StateLogAnnotation) |-|
     line.highlight |-|

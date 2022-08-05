@@ -3,6 +3,8 @@ package saft
 import zio.*
 import com.softwaremill.quicklens.*
 
+import java.io.IOException
+
 case class NodeId(id: String)
 
 opaque type Term <: Int = Int
@@ -209,9 +211,12 @@ class Node(
   private val majority = math.ceil(nodes.size.toDouble / 2).toInt
 
   def start: UIO[Unit] =
-    setLogAnnotation(NodeIdLogAnnotation, nodeId.id) *> Timer(electionTimeout, heartbeatTimeout, events)
-      .flatMap(_.restartElection)
-      .flatMap(timer => persistence.get.flatMap(state => follower(state, FollowerState(None), timer)))
+    setLogAnnotation(NodeIdLogAnnotation, nodeId.id) *>
+      ZIO.log("Node started") *>
+      Timer(electionTimeout, heartbeatTimeout, events)
+        .flatMap(_.restartElection)
+        .flatMap(timer => persistence.get.flatMap(state => follower(state, FollowerState(None), timer)))
+        .onExit(_ => ZIO.log("Node stopped"))
 
   private def follower(state: ServerState, followerState: FollowerState, timer: Timer): UIO[Unit] =
     setLogAnnotation(StateLogAnnotation, "follower") *> nextEvent(state, timer)(handleFollower(_, state, followerState, timer))
@@ -416,11 +421,11 @@ object Saft extends ZIOAppDefault with Logging {
     val heartbeatTimeoutDuration = Duration.fromMillis(500)
     val electionRandomization = 500
 
-    val nodeIds = (1 to numberOfNodes).map(i => NodeId(s"node$i"))
+    val nodeIds = (1 to numberOfNodes).map(nodeIdWithIndex)
     for {
       eventQueues <- ZIO.foreach(nodeIds)(nodeId => Queue.unbounded[ServerEvent].map(nodeId -> _)).map(_.toMap)
       stateMachines <- ZIO
-        .foreach(nodeIds)(nodeId => StateMachine(logEntry => ZIO.log(s"[$nodeId] Apply: $logEntry")).map(nodeId -> _))
+        .foreach(nodeIds)(nodeId => StateMachine(logEntry => ZIO.log(s"Apply: $logEntry")).map(nodeId -> _))
         .map(_.toMap)
       send = {
         def doSend(nodeId: NodeId)(toNodeId: NodeId, msg: ToServerMessage): UIO[Unit] =
@@ -442,23 +447,61 @@ object Saft extends ZIOAppDefault with Logging {
         .flatMap(randomization => ZIO.sleep(electionTimeoutDuration.plusMillis(randomization)))
       heartbeatTimeout = ZIO.sleep(heartbeatTimeoutDuration)
       persistence <- InMemoryPersistence(nodeIds)
-      nodes = nodeIds.toList.map(nodeId =>
-        new Node(
-          nodeId,
-          eventQueues(nodeId),
-          send(nodeId),
-          stateMachines(nodeId),
-          nodeIds.toSet,
-          electionTimeout,
-          heartbeatTimeout,
-          persistence.forNodeId(nodeId)
+      nodes = nodeIds.toList
+        .map(nodeId =>
+          nodeId -> new Node(
+            nodeId,
+            eventQueues(nodeId),
+            send(nodeId),
+            stateMachines(nodeId),
+            nodeIds.toSet,
+            electionTimeout,
+            heartbeatTimeout,
+            persistence.forNodeId(nodeId)
+          )
         )
-      )
-      fibers <- ZIO.foreach(nodes)(n => n.start.onExit(_ => ZIO.log("Node fiber done")).fork)
-      _ <- ZIO.log(s"$numberOfNodes nodes started. Press any key to exit.")
-      _ <- Console.readLine
-      _ <- ZIO.foreach(fibers)(f => f.interrupt)
-      _ <- ZIO.log("Bye!")
+        .toMap
+      fibers <- ZIO.foreach(nodes)((nodeId, node) => node.start.fork.map(nodeId -> _))
+      _ <- ZIO.log(s"$numberOfNodes nodes started.")
+      _ <- ZIO.log("E - exit; Nn data - send new entry <data> to node <n>; Kn - kill node n; Sn - start node n")
+      _ <- run(fibers, nodes, eventQueues)
     } yield ()
+  }
+
+  private def nodeIdWithIndex(i: Int): NodeId = NodeId(s"node$i")
+
+  private val newEntryPattern = "N(\\d+) (.+)".r
+  private val killPattern = "K(\\d+)".r
+  private val startPattern = "S(\\d+)".r
+
+  private def run(
+      fibers: Map[NodeId, Fiber.Runtime[Nothing, Unit]],
+      nodes: Map[NodeId, Node],
+      queues: Map[NodeId, Queue[ServerEvent]]
+  ): IO[IOException, Unit] = Console.readLine.flatMap {
+    case "E" => ZIO.foreach(fibers.values)(f => f.interrupt) *> ZIO.log("Bye!")
+
+    case newEntryPattern(nodeNumber, newEntry) =>
+      val nodeId = nodeIdWithIndex(nodeNumber.toInt)
+      queues.get(nodeId) match
+        case None => ZIO.log(s"Unknown node: $nodeNumber") *> run(fibers, nodes, queues)
+        case Some(queue) =>
+          queue.offer(RequestReceived(NewEntry(newEntry), responseMessage => ZIO.log(s"Response: $responseMessage"))).unit *>
+            run(fibers, nodes, queues)
+
+    case killPattern(nodeNumber) =>
+      val nodeId = nodeIdWithIndex(nodeNumber.toInt)
+      fibers.get(nodeId) match
+        case None        => ZIO.log(s"Node $nodeNumber is not started") *> run(fibers, nodes, queues)
+        case Some(fiber) => fiber.interrupt *> run(fibers.removed(nodeId), nodes, queues)
+
+    case startPattern(nodeNumber) =>
+      val nodeId = nodeIdWithIndex(nodeNumber.toInt)
+      (fibers.get(nodeId), nodes.get(nodeId)) match
+        case (None, Some(node)) => node.start.fork.flatMap(fiber => run(fibers + (nodeId -> fiber), nodes, queues))
+        case (_, None)          => ZIO.log(s"Unknown node: $nodeNumber") *> run(fibers, nodes, queues)
+        case (Some(_), Some(_)) => ZIO.log(s"Node $nodeNumber is already started") *> run(fibers, nodes, queues)
+
+    case _ => ZIO.log("Unknown command") *> run(fibers, nodes, queues)
   }
 }
