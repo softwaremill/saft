@@ -51,7 +51,7 @@ object AppendEntriesResponse:
       }
     )
 
-case class NewEntry(entry: String) extends ToServerMessage
+case class NewEntry(data: LogData) extends ToServerMessage
 case object NewEntryAddedResponse extends ResponseMessage with ToClientMessage
 
 /** Response sent in case a [[NewEntry]] is received by a non-leader node. */

@@ -10,13 +10,13 @@ case class RequestReceived(message: ToServerMessage, respond: ResponseMessage =>
 
 //
 
-class StateMachine(toApply: Enqueue[LogEntry]):
-  def apply(entry: LogEntry): UIO[Unit] = toApply.offer(entry).unit
+class StateMachine(toApply: Enqueue[LogData]):
+  def apply(entry: LogData): UIO[Unit] = toApply.offer(entry).unit
 
 object StateMachine:
-  def apply(doApply: LogEntry => UIO[Unit]): UIO[StateMachine] =
+  def apply(doApply: LogData => UIO[Unit]): UIO[StateMachine] =
     for {
-      toApplyQueue <- Queue.unbounded[LogEntry]
+      toApplyQueue <- Queue.bounded[LogData](16)
       _ <- toApplyQueue.take.flatMap(doApply).forever.fork
     } yield new StateMachine(toApplyQueue)
 
@@ -216,7 +216,7 @@ class Node(
   }
 
   private def applyEntries(state: ServerState): UIO[ServerState] =
-    ZIO.foreach(state.indexesToApply)(i => stateMachine(state.log(i))).as {
+    ZIO.foreach(state.indexesToApply)(i => stateMachine(state.log(i).data)).as {
       // If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
       state.updateLastAppliedToCommit()
     }

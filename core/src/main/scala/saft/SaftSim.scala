@@ -6,6 +6,7 @@ import java.io.IOException
 
 object SaftSim extends ZIOAppDefault with Logging {
   def run: Task[Unit] = {
+    // configuration
     val numberOfNodes = 5
     val electionTimeoutDuration = Duration.fromMillis(2000)
     val heartbeatTimeoutDuration = Duration.fromMillis(500)
@@ -72,12 +73,14 @@ object SaftSim extends ZIOAppDefault with Logging {
       Console.readLine.flatMap {
         case "E" => ZIO.foreach(fibers.values)(f => f.interrupt) *> ZIO.log("Bye!")
 
-        case newEntryPattern(nodeNumber, newEntry) =>
+        case newEntryPattern(nodeNumber, data) =>
           val nodeId = nodeIdWithIndex(nodeNumber.toInt)
           queues.get(nodeId) match
             case None => ZIO.log(s"Unknown node: $nodeNumber") *> doRun(fibers)
             case Some(queue) =>
-              queue.offer(RequestReceived(NewEntry(newEntry), responseMessage => ZIO.log(s"Response: $responseMessage"))).unit *> doRun(
+              queue
+                .offer(RequestReceived(NewEntry(LogData(data)), responseMessage => ZIO.log(s"Response: $responseMessage")))
+                .unit *> doRun(
                 fibers
               )
 
