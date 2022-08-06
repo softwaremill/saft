@@ -12,6 +12,7 @@ object SaftSim extends ZIOAppDefault with Logging {
     val heartbeatTimeoutDuration = Duration.fromMillis(500)
     val electionRandomization = 500
 
+    // setup nodes
     val nodeIds = (1 to numberOfNodes).map(nodeIdWithIndex)
     for {
       eventQueues <- ZIO.foreach(nodeIds)(nodeId => Queue.sliding[ServerEvent](16).map(nodeId -> _)).map(_.toMap)
@@ -55,23 +56,26 @@ object SaftSim extends ZIOAppDefault with Logging {
         )
         .toMap
       _ <- ZIO.log("E - exit; Nn data - send new entry <data> to node <n>; Kn - kill node n; Sn - start node n")
+      // run interactive loop
       _ <- run(nodes, eventQueues)
     } yield ()
   }
 
   private def nodeIdWithIndex(i: Int): NodeId = NodeId(s"node$i")
 
+  private case class RunDone()
+
   private def run(
       nodes: Map[NodeId, Node],
       queues: Map[NodeId, Queue[ServerEvent]]
-  ): IO[IOException, Unit] =
+  ): IO[IOException, RunDone] =
     val newEntryPattern = "N(\\d+) (.+)".r
     val killPattern = "K(\\d+)".r
     val startPattern = "S(\\d+)".r
 
-    def doRun(fibers: Map[NodeId, Fiber.Runtime[Nothing, Unit]]): IO[IOException, Unit] =
+    def doRun(fibers: Map[NodeId, Fiber.Runtime[Nothing, Unit]]): IO[IOException, RunDone] =
       Console.readLine.flatMap {
-        case "E" => ZIO.foreach(fibers.values)(f => f.interrupt) *> ZIO.log("Bye!")
+        case "E" => ZIO.foreach(fibers.values)(f => f.interrupt) *> ZIO.log("Bye!") *> ZIO.succeed(RunDone())
 
         case newEntryPattern(nodeNumber, data) =>
           val nodeId = nodeIdWithIndex(nodeNumber.toInt)
@@ -80,9 +84,7 @@ object SaftSim extends ZIOAppDefault with Logging {
             case Some(queue) =>
               queue
                 .offer(RequestReceived(NewEntry(LogData(data)), responseMessage => ZIO.log(s"Response: $responseMessage")))
-                .unit *> doRun(
-                fibers
-              )
+                .unit *> doRun(fibers)
 
         case killPattern(nodeNumber) =>
           val nodeId = nodeIdWithIndex(nodeNumber.toInt)
