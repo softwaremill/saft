@@ -4,6 +4,7 @@ import zio.*
 
 import java.io.IOException
 
+/** A Raft simulation using a number of in-memory nodes with in-memory persistence and in-memory communication. */
 object SaftSim extends ZIOAppDefault with Logging {
   override def run: Task[Unit] = {
     // configuration
@@ -17,7 +18,8 @@ object SaftSim extends ZIOAppDefault with Logging {
     val nodeIds = (1 to numberOfNodes).map(nodeIdWithIndex)
     val electionTimeout = ZIO.random
       .flatMap(_.nextIntBounded(electionRandomization))
-      .flatMap(randomization => ZIO.sleep(electionTimeoutDuration.plusMillis(randomization))).as(Timeout)
+      .flatMap(randomization => ZIO.sleep(electionTimeoutDuration.plusMillis(randomization)))
+      .as(Timeout)
     val heartbeatTimeout = ZIO.sleep(heartbeatTimeoutDuration).as(Timeout)
 
     for {

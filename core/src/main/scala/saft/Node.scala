@@ -19,7 +19,7 @@ class Node(
     electionTimeout: UIO[Timeout.type],
     heartbeatTimeout: UIO[Timeout.type],
     persistence: Persistence
-) {
+):
   private val otherNodes = nodes - nodeId
   private val majority = math.ceil(nodes.size.toDouble / 2).toInt
 
@@ -90,7 +90,7 @@ class Node(
     // On conversion to candidate, start election: Increment currentTerm, Vote for self
     val state2 = state.incrementTerm(nodeId)
     // Reset election timer
-    ZIO.log(s"Became candidate (${state2.currentTerm})") *> timer.restartElection.flatMap(timer2 =>
+    ZIO.log(s"Became candidate (term: ${state2.currentTerm})") *> timer.restartElection.flatMap(timer2 =>
       persistence(state, state2) *>
         // Send RequestVote RPCs to all other servers
         ZIO.foreachPar(otherNodes)(otherNodeId => doSend(otherNodeId, RequestVote(state2.currentTerm, nodeId, state2.lastEntryTerm))) *>
@@ -111,11 +111,8 @@ class Node(
         if state.currentTerm == ae.term
         then handleFollower(r, state, FollowerState(Some(ae.leaderId)), timer)
         else
-          doRespond(AppendEntriesResponse.to(nodeId, ae)(state.currentTerm, success = false), respond) *> candidate(
-            state,
-            candidateState,
-            timer
-          )
+          doRespond(AppendEntriesResponse.to(nodeId, ae)(state.currentTerm, success = false), respond) *>
+            candidate(state, candidateState, timer)
 
       case RequestReceived(_: NewEntry, respond) =>
         doRespond(RedirectToLeaderResponse(None), respond) *> candidate(state, candidateState, timer)
@@ -151,7 +148,7 @@ class Node(
     setLogAnnotation(StateLogAnnotation, "leader") *> nextEvent(state, timer) {
       // repeat during idle periods to prevent election timeouts (§5.2)
       case Timeout =>
-        sendAppendEntries(state, leaderState, timer).flatMap(newTimer => leader(state, leaderState, newTimer))
+        sendAppendEntries(state, leaderState, timer).flatMap(timer2 => leader(state, leaderState, timer2))
 
       // If command received from client: append entry to local log
       case RequestReceived(NewEntry(value), respond) =>
@@ -189,9 +186,9 @@ class Node(
     }
 
   private def sendAppendEntries(state: ServerState, leaderState: LeaderState, timer: Timer): UIO[Timer] =
-    timer.restartHeartbeat.flatMap(newTimer => ZIO.foreachPar(otherNodes)(sendAppendEntry(_, state, leaderState)).as(newTimer))
+    timer.restartHeartbeat.flatMap(timer2 => ZIO.foreachPar(otherNodes)(sendAppendEntry(_, state, leaderState)).as(timer2))
 
-  private def sendAppendEntry(otherNodeId: NodeId, state: ServerState, leaderState: LeaderState): UIO[Unit] = {
+  private def sendAppendEntry(otherNodeId: NodeId, state: ServerState, leaderState: LeaderState): UIO[Unit] =
     // If last log index ≥ nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
     val nextIndex = leaderState.nextIndex(otherNodeId)
     val prevEntry =
@@ -201,7 +198,6 @@ class Node(
         Some(LogIndexTerm(state.log(prev).term, prev))
 
     doSend(otherNodeId, AppendEntries(state.currentTerm, nodeId, prevEntry, state.log.drop(nextIndex), state.commitIndex))
-  }
 
   private def applyEntries(state: ServerState): UIO[ServerState] =
     ZIO.foreach(state.indexesToApply)(i => stateMachine(state.log(i).data)).as {
@@ -220,7 +216,6 @@ class Node(
 
   private def doSend(to: NodeId, msg: ToServerMessage): UIO[Unit] = ZIO.logDebug(s"Send to ${to.id}: $msg") *> send(to, msg)
   private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.logDebug(s"Response: $msg") *> respond(msg)
-}
 
 /** @param electionTimeout
   *   The timeout for an election - used when starting an election timer using [[restartElection]].
@@ -235,14 +230,12 @@ private class Timer(
     heartbeatTimeout: UIO[Timeout.type],
     queue: Enqueue[Timeout.type],
     currentTimer: Fiber.Runtime[Nothing, Boolean]
-) {
+):
   private def restart(timeout: UIO[Timeout.type]): UIO[Timer] =
     currentTimer.interrupt *> timeout.flatMap(queue.offer).fork.map(new Timer(electionTimeout, heartbeatTimeout, queue, _))
   def restartElection: UIO[Timer] = restart(electionTimeout)
   def restartHeartbeat: UIO[Timer] = restart(heartbeatTimeout)
-}
 
-private object Timer {
+private object Timer:
   def apply(electionTimeout: UIO[Timeout.type], heartbeatTimeout: UIO[Timeout.type], queue: Enqueue[Timeout.type]): UIO[Timer] =
     ZIO.never.fork.map(new Timer(electionTimeout, heartbeatTimeout, queue, _))
-}

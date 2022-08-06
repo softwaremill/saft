@@ -8,7 +8,7 @@ case class ServerState(
     currentTerm: Term,
     commitIndex: Option[LogIndex],
     lastApplied: Option[LogIndex]
-) {
+):
   def updateTerm(observedTerm: Term): ServerState =
     if (observedTerm > currentTerm) copy(currentTerm = observedTerm, votedFor = None) else this
 
@@ -51,12 +51,13 @@ case class ServerState(
     case (Some(la), Some(ci)) => (la + 1) to ci
     case (Some(la), None)     => throw new IllegalStateException(s"Last applied is set to $la, but no commit index is set")
   }
-}
 
 object ServerState:
   val Initial: ServerState = ServerState(Vector.empty, None, Term(0), None, None)
 
-// the extra awaitingResponse is needed to properly reply to NewEntry requests once entries are replicated
+/** @param awaitingResponses
+  *   Needed to properly reply to [[NewEntry]] requests once entries are replicated.
+  */
 case class LeaderState(
     nextIndex: Map[NodeId, LogIndex],
     matchIndex: Map[NodeId, Option[LogIndex]],
@@ -88,6 +89,7 @@ case class LeaderState(
     copy(awaitingResponses = awaitingResponses :+ (index, respond))
 
   def removeAwaitingResponses(upToIndex: LogIndex): (LeaderState, Vector[UIO[Unit]]) =
+    // using the fact that indexes in awaitingResponses always increase
     val (doneWaiting, stillAwaiting) = awaitingResponses.span(_._1 <= upToIndex)
     (copy(awaitingResponses = stillAwaiting), doneWaiting.map(_._2))
 
