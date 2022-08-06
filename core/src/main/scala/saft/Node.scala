@@ -10,18 +10,6 @@ case class RequestReceived(message: ToServerMessage, respond: ResponseMessage =>
 
 //
 
-class StateMachine(toApply: Enqueue[LogData]):
-  def apply(entry: LogData): UIO[Unit] = toApply.offer(entry).unit
-
-object StateMachine:
-  def apply(doApply: LogData => UIO[Unit]): UIO[StateMachine] =
-    for {
-      toApplyQueue <- Queue.bounded[LogData](16)
-      _ <- toApplyQueue.take.flatMap(doApply).forever.fork
-    } yield new StateMachine(toApplyQueue)
-
-//
-
 class Node(
     nodeId: NodeId,
     events: Queue[ServerEvent],

@@ -11,16 +11,12 @@ object SaftSim extends ZIOAppDefault with Logging {
     val electionTimeoutDuration = Duration.fromMillis(2000)
     val heartbeatTimeoutDuration = Duration.fromMillis(500)
     val electionRandomization = 500
+    val applyLogData = (nodeId: NodeId) => (data: LogData) => ZIO.logAnnotate(NodeIdLogAnnotation, nodeId.id)(ZIO.log(s"Apply: $data"))
 
     // setup nodes
     val nodeIds = (1 to numberOfNodes).map(nodeIdWithIndex)
     for {
       eventQueues <- ZIO.foreach(nodeIds)(nodeId => Queue.sliding[ServerEvent](16).map(nodeId -> _)).map(_.toMap)
-      stateMachines <- ZIO
-        .foreach(nodeIds)(nodeId =>
-          StateMachine(logEntry => ZIO.logAnnotate(NodeIdLogAnnotation, nodeId.id)(ZIO.log(s"Apply: $logEntry"))).map(nodeId -> _)
-        )
-        .map(_.toMap)
       send = {
         def doSend(nodeId: NodeId)(toNodeId: NodeId, msg: ToServerMessage): UIO[Unit] =
           eventQueues(toNodeId)
@@ -36,6 +32,7 @@ object SaftSim extends ZIOAppDefault with Logging {
             .unit
         doSend _
       }
+      stateMachines <- ZIO.foreach(nodeIds)(nodeId => StateMachine.background(applyLogData(nodeId)).map(nodeId -> _)).map(_.toMap)
       electionTimeout = ZIO.random
         .flatMap(_.nextIntBounded(electionRandomization))
         .flatMap(randomization => ZIO.sleep(electionTimeoutDuration.plusMillis(randomization)))
