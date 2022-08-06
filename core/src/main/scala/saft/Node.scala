@@ -258,9 +258,7 @@ class Node(
 
             // If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine (§5.3)
             timer.restartElection.flatMap { timer2 =>
-              ZIO.foreach(state2.indexesToApply)(i => stateMachine(state2.log(i))).flatMap { _ =>
-                // If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-                val state3 = state2.updateLastAppliedToCommit()
+              applyEntries(state2).flatMap { state3 =>
                 persistence(state, state3) *> doRespond(response, respond) *> follower(state3, followerState2, timer2)
               }
             }
@@ -343,7 +341,7 @@ class Node(
       case RequestReceived(NewEntry(value), respond) =>
         val state2 = state.appendEntry(LogEntry(value, state.currentTerm))
         val leaderState2 = leaderState.addAwaitingResponse(LogIndex(state.log.length - 1), doRespond(NewEntryAddedResponse, respond))
-        sendAppendEntries(state2, leaderState2, timer).flatMap(leader(state2, leaderState2, _))
+        persistence(state, state2) *> sendAppendEntries(state2, leaderState2, timer).flatMap(leader(state2, leaderState2, _))
 
       // If successful: update nextIndex and matchIndex for follower (§5.3)
       case RequestReceived(AppendEntriesResponse(_, true, followerId, range), _) =>
@@ -358,7 +356,9 @@ class Node(
             case Some(ci) => leaderState2.removeAwaitingResponses(ci)
 
           // respond after entry applied to state machine (§5.3)
-          ZIO.foreachPar(responses)(identity) *> sendAppendEntries(state2, leaderState3, timer).flatMap(leader(state2, leaderState3, _))
+          applyEntries(state2).flatMap { state3 =>
+            ZIO.foreachPar(responses)(identity) *> sendAppendEntries(state3, leaderState3, timer).flatMap(leader(state3, leaderState3, _))
+          }
         else leader(state, leaderState2, timer)
 
       // If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
@@ -386,6 +386,12 @@ class Node(
 
     doSend(otherNodeId, AppendEntries(state.currentTerm, nodeId, prevEntry, state.log.drop(nextIndex), state.commitIndex))
   }
+
+  private def applyEntries(state: ServerState): UIO[ServerState] =
+    ZIO.foreach(state.indexesToApply)(i => stateMachine(state.log(i))).as {
+      // If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+      state.updateLastAppliedToCommit()
+    }
 
   private def nextEvent(state: ServerState, timer: Timer)(next: ServerEvent => UIO[Unit]): UIO[Unit] =
     events.take.flatMap {
@@ -425,7 +431,9 @@ object Saft extends ZIOAppDefault with Logging {
     for {
       eventQueues <- ZIO.foreach(nodeIds)(nodeId => Queue.unbounded[ServerEvent].map(nodeId -> _)).map(_.toMap)
       stateMachines <- ZIO
-        .foreach(nodeIds)(nodeId => StateMachine(logEntry => ZIO.log(s"Apply: $logEntry")).map(nodeId -> _))
+        .foreach(nodeIds)(nodeId =>
+          StateMachine(logEntry => ZIO.logAnnotate(NodeIdLogAnnotation, nodeId.id)(ZIO.log(s"Apply: $logEntry"))).map(nodeId -> _)
+        )
         .map(_.toMap)
       send = {
         def doSend(nodeId: NodeId)(toNodeId: NodeId, msg: ToServerMessage): UIO[Unit] =
