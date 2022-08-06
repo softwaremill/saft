@@ -429,7 +429,7 @@ object Saft extends ZIOAppDefault with Logging {
 
     val nodeIds = (1 to numberOfNodes).map(nodeIdWithIndex)
     for {
-      eventQueues <- ZIO.foreach(nodeIds)(nodeId => Queue.unbounded[ServerEvent].map(nodeId -> _)).map(_.toMap)
+      eventQueues <- ZIO.foreach(nodeIds)(nodeId => Queue.sliding[ServerEvent](16).map(nodeId -> _)).map(_.toMap)
       stateMachines <- ZIO
         .foreach(nodeIds)(nodeId =>
           StateMachine(logEntry => ZIO.logAnnotate(NodeIdLogAnnotation, nodeId.id)(ZIO.log(s"Apply: $logEntry"))).map(nodeId -> _)
@@ -506,7 +506,7 @@ object Saft extends ZIOAppDefault with Logging {
         case startPattern(nodeNumber) =>
           val nodeId = nodeIdWithIndex(nodeNumber.toInt)
           (fibers.get(nodeId), nodes.get(nodeId)) match
-            case (None, Some(node)) => node.start.fork.flatMap(fiber => doRun(fibers + (nodeId -> fiber)))
+            case (None, Some(node)) => queues(nodeId).takeAll *> node.start.fork.flatMap(fiber => doRun(fibers + (nodeId -> fiber)))
             case (_, None)          => ZIO.log(s"Unknown node: $nodeNumber") *> doRun(fibers)
             case (Some(_), Some(_)) => ZIO.log(s"Node $nodeNumber is already started") *> doRun(fibers)
 
