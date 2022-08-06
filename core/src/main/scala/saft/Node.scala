@@ -4,12 +4,12 @@ import zio.*
 
 import java.io.IOException
 
-sealed trait ServerEvent
-case object Timeout extends ServerEvent
-case class RequestReceived(message: ToServerMessage, respond: ResponseMessage => UIO[Unit]) extends ServerEvent
-
-//
-
+/** A Raft node. Communicates with the outside world using [[events]] and [[send]]. Committed logs are applied to [[stateMachine]].
+  * @param events
+  *   The event queue for this node, with incoming events.
+  * @param send
+  *   Used for inter-node communication. Sends the given message to the given node.
+  */
 class Node(
     nodeId: NodeId,
     events: Queue[ServerEvent],
