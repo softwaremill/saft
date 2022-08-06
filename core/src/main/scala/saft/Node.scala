@@ -307,7 +307,7 @@ class Node(
       case RequestReceived(RequestVoteResponse(_, voteGranted), _) if voteGranted =>
         val candidateState2 = candidateState.modify(_.receivedVotes).using(_ + 1)
         // If votes received from majority of servers: become leader
-        if candidateState2.receivedVotes > majority
+        if candidateState2.receivedVotes >= majority
         then startLeader(state, timer)
         else candidate(state, candidateState2, timer)
       case RequestReceived(_: RequestVoteResponse, _) => candidate(state, candidateState, timer)
