@@ -1,7 +1,6 @@
 package saft
 
 import zio.*
-import com.softwaremill.quicklens.*
 
 import java.io.IOException
 
@@ -134,7 +133,7 @@ class Node(
         doRespond(RedirectToLeaderResponse(None), respond) *> candidate(state, candidateState, timer)
 
       case RequestReceived(RequestVoteResponse(_, voteGranted), _) if voteGranted =>
-        val candidateState2 = candidateState.modify(_.receivedVotes).using(_ + 1)
+        val candidateState2 = candidateState.increaseReceivedVotes
         // If votes received from majority of servers: become leader
         if candidateState2.receivedVotes >= majority
         then startLeader(state, timer)
@@ -179,7 +178,7 @@ class Node(
         val newCommitIndex = leaderState.commitIndex(if state.log.isEmpty then None else Some(LogIndex(state.log.length - 1)), majority)
         if state.commitIndex != newCommitIndex
         then
-          val state2 = state.modify(_.commitIndex).setTo(newCommitIndex)
+          val state2 = state.commitIndex(newCommitIndex)
           val (leaderState3, responses) = newCommitIndex match
             case None     => (leaderState2, Vector.empty)
             case Some(ci) => leaderState2.removeAwaitingResponses(ci)

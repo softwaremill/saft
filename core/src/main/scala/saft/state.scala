@@ -36,6 +36,8 @@ case class ServerState(
   def appendEntries(entries: Vector[LogEntry], afterIndex: Option[LogIndex]): ServerState =
     copy(log = log.take(afterIndex.getOrElse(-1) + 1) ++ entries)
 
+  def commitIndex(newCommitIndex: Option[LogIndex]): ServerState = copy(commitIndex = newCommitIndex)
+
   def updateCommitIndex(leaderCommitIndex: Option[LogIndex]): ServerState = (commitIndex, leaderCommitIndex) match
     case (Some(ours), Some(leader)) if ours < leader => copy(commitIndex = leaderCommitIndex)
     case (None, Some(_))                             => copy(commitIndex = leaderCommitIndex)
@@ -89,7 +91,8 @@ case class LeaderState(
     val (doneWaiting, stillAwaiting) = awaitingResponses.span(_._1 <= upToIndex)
     (copy(awaitingResponses = stillAwaiting), doneWaiting.map(_._2))
 
-case class FollowerState(leaderId: Option[NodeId]) {
+case class FollowerState(leaderId: Option[NodeId]):
   def leaderId(other: NodeId): FollowerState = copy(leaderId = Some(other))
-}
-case class CandidateState(receivedVotes: Int)
+
+case class CandidateState(receivedVotes: Int):
+  def increaseReceivedVotes: CandidateState = copy(receivedVotes = receivedVotes + 1)

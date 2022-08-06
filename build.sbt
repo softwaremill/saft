@@ -16,7 +16,6 @@ lazy val core: Project = (project in file("core"))
     name := "core",
     libraryDependencies ++= Seq(
       "dev.zio" %% "zio" % "2.0.0",
-      "dev.zio" %% "zio-logging" % "2.0.1",
-      "com.softwaremill.quicklens" %% "quicklens" % "1.8.8"
+      "dev.zio" %% "zio-logging" % "2.0.1"
     )
   )
