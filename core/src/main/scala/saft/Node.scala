@@ -210,7 +210,7 @@ class Node(
   private val otherNodes = nodes - nodeId
   private val majority = math.ceil(nodes.size.toDouble / 2).toInt
 
-  def start: UIO[Unit] =
+  def start: UIO[Nothing] =
     setLogAnnotation(NodeIdLogAnnotation, nodeId.id) *>
       ZIO.log("Node started") *>
       Timer(electionTimeout, heartbeatTimeout, events)
@@ -218,10 +218,10 @@ class Node(
         .flatMap(timer => persistence.get.flatMap(state => follower(state, FollowerState(None), timer)))
         .onExit(_ => ZIO.log("Node stopped"))
 
-  private def follower(state: ServerState, followerState: FollowerState, timer: Timer): UIO[Unit] =
+  private def follower(state: ServerState, followerState: FollowerState, timer: Timer): UIO[Nothing] =
     setLogAnnotation(StateLogAnnotation, "follower") *> nextEvent(state, timer)(handleFollower(_, state, followerState, timer))
 
-  private def handleFollower(event: ServerEvent, state: ServerState, followerState: FollowerState, timer: Timer): UIO[Unit] =
+  private def handleFollower(event: ServerEvent, state: ServerState, followerState: FollowerState, timer: Timer): UIO[Nothing] =
     setLogAnnotation(StateLogAnnotation, "follower") *> {
       event match {
         // If election timeout elapses without receiving AppendEntries RPC from current leader or granting vote to candidate: convert to candidate
@@ -264,7 +264,8 @@ class Node(
             }
           }
 
-        case RequestReceived(_: NewEntry, respond) => doRespond(RedirectToLeaderResponse(followerState.leaderId), respond)
+        case RequestReceived(_: NewEntry, respond) =>
+          doRespond(RedirectToLeaderResponse(followerState.leaderId), respond) *> follower(state, followerState, timer)
 
         // ignore
         case RequestReceived(_: RequestVoteResponse, _)   => follower(state, followerState, timer)
@@ -272,7 +273,7 @@ class Node(
       }
     }
 
-  private def startCandidate(state: ServerState, timer: Timer): UIO[Unit] = setLogAnnotation(StateLogAnnotation, "candidate-start") *> {
+  private def startCandidate(state: ServerState, timer: Timer): UIO[Nothing] = setLogAnnotation(StateLogAnnotation, "candidate-start") *> {
     // On conversion to candidate, start election: Increment currentTerm, Vote for self
     val state2 = state.incrementTerm(nodeId)
     // Reset election timer
@@ -284,7 +285,7 @@ class Node(
     )
   }
 
-  private def candidate(state: ServerState, candidateState: CandidateState, timer: Timer): UIO[Unit] =
+  private def candidate(state: ServerState, candidateState: CandidateState, timer: Timer): UIO[Nothing] =
     setLogAnnotation(StateLogAnnotation, "candidate") *> nextEvent(state, timer) {
       // If election timeout elapses: start new election
       case Timeout => startCandidate(state, timer)
@@ -303,7 +304,9 @@ class Node(
             timer
           )
 
-      case RequestReceived(_: NewEntry, respond) => doRespond(RedirectToLeaderResponse(None), respond)
+      case RequestReceived(_: NewEntry, respond) =>
+        doRespond(RedirectToLeaderResponse(None), respond) *> candidate(state, candidateState, timer)
+
       case RequestReceived(RequestVoteResponse(_, voteGranted), _) if voteGranted =>
         val candidateState2 = candidateState.modify(_.receivedVotes).using(_ + 1)
         // If votes received from majority of servers: become leader
@@ -316,7 +319,7 @@ class Node(
       case RequestReceived(_: AppendEntriesResponse, _) => candidate(state, candidateState, timer)
     }
 
-  private def startLeader(state: ServerState, timer: Timer): UIO[Unit] = setLogAnnotation(StateLogAnnotation, "leader-start") *> {
+  private def startLeader(state: ServerState, timer: Timer): UIO[Nothing] = setLogAnnotation(StateLogAnnotation, "leader-start") *> {
     val leaderState = LeaderState(
       // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
       otherNodes.map(_ -> state.lastEntryTerm.map(_.index).fold(LogIndex(0))(i => LogIndex(i + 1))).toMap,
@@ -331,7 +334,7 @@ class Node(
     )
   }
 
-  private def leader(state: ServerState, leaderState: LeaderState, timer: Timer): UIO[Unit] =
+  private def leader(state: ServerState, leaderState: LeaderState, timer: Timer): UIO[Nothing] =
     setLogAnnotation(StateLogAnnotation, "leader") *> nextEvent(state, timer) {
       // repeat during idle periods to prevent election timeouts (§5.2)
       case Timeout =>
@@ -393,7 +396,7 @@ class Node(
       state.updateLastAppliedToCommit()
     }
 
-  private def nextEvent(state: ServerState, timer: Timer)(next: ServerEvent => UIO[Unit]): UIO[Unit] =
+  private def nextEvent(state: ServerState, timer: Timer)(next: ServerEvent => UIO[Nothing]): UIO[Nothing] =
     events.take.flatMap {
       // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
       case e @ RequestReceived(msg: FromServerMessage, _) if msg.term > state.currentTerm =>
