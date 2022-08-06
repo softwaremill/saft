@@ -5,177 +5,9 @@ import com.softwaremill.quicklens.*
 
 import java.io.IOException
 
-case class NodeId(id: String)
-
-opaque type Term <: Int = Int
-object Term:
-  def apply(t: Int): Term = t
-
-opaque type LogIndex <: Int = Int
-object LogIndex:
-  def apply(i: Int): LogIndex = i
-
-case class LogEntry(value: String, term: Term)
-case class LogIndexTerm(term: Term, index: LogIndex)
-
-//
-
-sealed trait Message
-sealed trait ToServerMessage extends Message
-sealed trait FromServerMessage extends Message:
-  def term: Term
-sealed trait ToClientMessage extends Message
-sealed trait ResponseMessage extends Message
-
-case class RequestVote(term: Term, candidateId: NodeId, lastLog: Option[LogIndexTerm]) extends ToServerMessage with FromServerMessage
-case class RequestVoteResponse(term: Term, voteGranted: Boolean) extends ResponseMessage with ToServerMessage with FromServerMessage
-
-case class AppendEntries(
-    term: Term,
-    leaderId: NodeId,
-    prevLog: Option[LogIndexTerm],
-    entries: Vector[LogEntry],
-    leaderCommit: Option[LogIndex]
-) extends ToServerMessage
-    with FromServerMessage
-// the extra followerId and entryIndexRange are needed to correlate the response & request, so that the leader can update nextIndex appropriately
-case class AppendEntriesResponse(term: Term, success: Boolean, followerId: NodeId, entryIndexRange: Option[(LogIndex, LogIndex)])
-    extends ResponseMessage
-    with ToServerMessage
-    with FromServerMessage
-object AppendEntriesResponse:
-  def to(followerId: NodeId, appendEntries: AppendEntries)(term: Term, success: Boolean): AppendEntriesResponse =
-    AppendEntriesResponse(
-      term,
-      success,
-      followerId, {
-        val firstIndex = appendEntries.entries.headOption.map(_ => LogIndex(appendEntries.prevLog.map(_.index).getOrElse(-1) + 1))
-        firstIndex.map(f => (f, LogIndex(f + appendEntries.entries.length - 1)))
-      }
-    )
-
-case class NewEntry(entry: String) extends ToServerMessage
-case object NewEntryAddedResponse extends ResponseMessage with ToClientMessage
-case class RedirectToLeaderResponse(leaderId: Option[NodeId]) extends ResponseMessage with ToClientMessage
-
-//
-
-case class ServerState(
-    log: Vector[LogEntry],
-    votedFor: Option[NodeId],
-    currentTerm: Term,
-    commitIndex: Option[LogIndex],
-    lastApplied: Option[LogIndex]
-) {
-  def updateTerm(observedTerm: Term): ServerState =
-    if (observedTerm > currentTerm) copy(currentTerm = observedTerm, votedFor = None) else this
-
-  def incrementTerm(self: NodeId): ServerState = copy(currentTerm = Term(currentTerm + 1), votedFor = Some(self))
-
-  def voteFor(other: NodeId): ServerState = copy(votedFor = Some(other))
-
-  def lastEntryTerm: Option[LogIndexTerm] = log.lastOption.map(lastLogEntry => LogIndexTerm(lastLogEntry.term, LogIndex(log.length - 1)))
-
-  def votedForOtherThan(candidateId: NodeId): Boolean = votedFor.nonEmpty && !votedFor.contains(candidateId)
-
-  def hasEntriesAfter(t: Option[LogIndexTerm]): Boolean = (t, lastEntryTerm) match
-    case (None, None)    => false
-    case (None, _)       => true
-    case (Some(_), None) => false
-    case (Some(otherLastEntry), Some(lastEntry)) =>
-      lastEntry.term > otherLastEntry.term || ((lastEntry.term == otherLastEntry.term) && (lastEntry.index > otherLastEntry.index))
-
-  def hasEntryAtTerm(t: Option[LogIndexTerm]): Boolean = t match
-    case None               => true
-    case Some(logEntryTerm) => log.length > logEntryTerm.index && log(logEntryTerm.index).term == logEntryTerm.term
-
-  def appendEntry(entry: LogEntry): ServerState = copy(log = log :+ entry)
-
-  def appendEntries(entries: Vector[LogEntry], afterIndex: Option[LogIndex]): ServerState =
-    copy(log = log.take(afterIndex.getOrElse(-1) + 1) ++ entries)
-
-  def updateCommitIndex(leaderCommitIndex: Option[LogIndex]): ServerState = (commitIndex, leaderCommitIndex) match
-    case (Some(ours), Some(leader)) if ours < leader => copy(commitIndex = leaderCommitIndex)
-    case (None, Some(_))                             => copy(commitIndex = leaderCommitIndex)
-    case _                                           => this
-
-  def updateLastAppliedToCommit(): ServerState = copy(lastApplied = commitIndex)
-
-  def indexesToApply: Seq[Int] = (lastApplied, commitIndex) match {
-    case (None, None)         => Nil
-    case (None, Some(ci))     => 0 to ci
-    case (Some(la), Some(ci)) => (la + 1) to ci
-    case (Some(la), None)     => throw new IllegalStateException(s"Last applied is set to $la, but no commit index is set")
-  }
-}
-
-object ServerState:
-  val Initial: ServerState = ServerState(Vector.empty, None, Term(0), None, None)
-
-// the extra awaitingResponse is needed to properly reply to NewEntry requests once entries are replicated
-case class LeaderState(
-    nextIndex: Map[NodeId, LogIndex],
-    matchIndex: Map[NodeId, Option[LogIndex]],
-    awaitingResponses: Vector[(LogIndex, UIO[Unit])]
-):
-  def appendSuccessful(nodeId: NodeId, lastIndex: Option[LogIndex]): LeaderState = lastIndex match
-    case Some(last) =>
-      LeaderState(
-        nextIndex.updated(nodeId, LogIndex(math.max(nextIndex(nodeId), last + 1))),
-        matchIndex.updated(nodeId, Some(LogIndex(math.max(matchIndex(nodeId).getOrElse(-1), last)))),
-        awaitingResponses
-      )
-    case None => this
-
-  def appendFailed(nodeId: NodeId, firstIndex: Option[LogIndex]): LeaderState = firstIndex match
-    case Some(first) =>
-      LeaderState(
-        nextIndex.updated(nodeId, LogIndex(math.min(nextIndex(nodeId), first - 1))),
-        matchIndex,
-        awaitingResponses
-      )
-    case None => this
-
-  def commitIndex(ourIndex: Option[LogIndex], majority: Int): Option[LogIndex] =
-    val indexes = (ourIndex :: matchIndex.values.toList).flatten
-    indexes.filter(i => indexes.count(_ >= i) >= majority).maxOption
-
-  def addAwaitingResponse(index: LogIndex, respond: UIO[Unit]): LeaderState =
-    copy(awaitingResponses = awaitingResponses :+ (index, respond))
-
-  def removeAwaitingResponses(upToIndex: LogIndex): (LeaderState, Vector[UIO[Unit]]) =
-    val (doneWaiting, stillAwaiting) = awaitingResponses.span(_._1 <= upToIndex)
-    (copy(awaitingResponses = stillAwaiting), doneWaiting.map(_._2))
-
-case class FollowerState(leaderId: Option[NodeId]) {
-  def leaderId(other: NodeId): FollowerState = copy(leaderId = Some(other))
-}
-case class CandidateState(receivedVotes: Int)
-
-//
-
 sealed trait ServerEvent
 case object Timeout extends ServerEvent
 case class RequestReceived(message: ToServerMessage, respond: ResponseMessage => UIO[Unit]) extends ServerEvent
-
-//
-
-class Timer(
-    electionTimeout: UIO[Unit],
-    heartbeatTimeout: UIO[Unit],
-    queue: Enqueue[Timeout.type],
-    currentTimer: Fiber.Runtime[Nothing, Boolean]
-) {
-  private def restart(timeout: UIO[Unit]): UIO[Timer] =
-    currentTimer.interrupt *> (timeout *> queue.offer(Timeout)).fork.map(new Timer(electionTimeout, heartbeatTimeout, queue, _))
-  def restartElection: UIO[Timer] = restart(electionTimeout)
-  def restartHeartbeat: UIO[Timer] = restart(heartbeatTimeout)
-}
-
-object Timer {
-  def apply(electionTimeout: UIO[Unit], heartbeatTimeout: UIO[Unit], queue: Enqueue[Timeout.type]): UIO[Timer] =
-    ZIO.never.fork.map(new Timer(electionTimeout, heartbeatTimeout, queue, _))
-}
 
 //
 
@@ -188,12 +20,6 @@ object StateMachine:
       toApplyQueue <- Queue.unbounded[LogEntry]
       _ <- toApplyQueue.take.flatMap(doApply).forever.fork
     } yield new StateMachine(toApplyQueue)
-
-//
-
-trait Persistence:
-  def apply(oldState: ServerState, newState: ServerState): UIO[Unit]
-  def get: UIO[ServerState]
 
 //
 
@@ -409,112 +235,27 @@ class Node(
   private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.logDebug(s"Response: $msg") *> respond(msg)
 }
 
-class InMemoryPersistence(refs: Map[NodeId, Ref[ServerState]]) {
-  def forNodeId(nodeId: NodeId): Persistence = new Persistence {
-    private val ref = refs(nodeId)
-    override def apply(oldState: ServerState, newState: ServerState): UIO[Unit] =
-      ref.set(newState.copy(commitIndex = None, lastApplied = None))
-    override def get: UIO[ServerState] = ref.get
-  }
+/** @param electionTimeout
+  *   The timeout for an election - used when starting an election timer using [[restartElection]].
+  * @param heartbeatTimeout
+  *   The timeout for a leader heartbeat (sending [[AppendEntries]]) - used when starting a heartbeat timer using [[restartHeartbeat]].
+  * @param currentTimer
+  *   The currently running timer - a fiber, which eventually puts a [[Timeout]] message to [[queue]]. Can be interrupted to cancel the
+  *   timer.
+  */
+private class Timer(
+    electionTimeout: UIO[Unit],
+    heartbeatTimeout: UIO[Unit],
+    queue: Enqueue[Timeout.type],
+    currentTimer: Fiber.Runtime[Nothing, Boolean]
+) {
+  private def restart(timeout: UIO[Unit]): UIO[Timer] =
+    currentTimer.interrupt *> (timeout *> queue.offer(Timeout)).fork.map(new Timer(electionTimeout, heartbeatTimeout, queue, _))
+  def restartElection: UIO[Timer] = restart(electionTimeout)
+  def restartHeartbeat: UIO[Timer] = restart(heartbeatTimeout)
 }
 
-object InMemoryPersistence {
-  def apply(nodeIds: Seq[NodeId]): UIO[InMemoryPersistence] =
-    ZIO.foreach(nodeIds.toList)(nodeId => Ref.make(ServerState.Initial).map(nodeId -> _)).map(_.toMap).map(new InMemoryPersistence(_))
-}
-
-object Saft extends ZIOAppDefault with Logging {
-  def run: Task[Unit] = {
-    val numberOfNodes = 5
-    val electionTimeoutDuration = Duration.fromMillis(2000)
-    val heartbeatTimeoutDuration = Duration.fromMillis(500)
-    val electionRandomization = 500
-
-    val nodeIds = (1 to numberOfNodes).map(nodeIdWithIndex)
-    for {
-      eventQueues <- ZIO.foreach(nodeIds)(nodeId => Queue.sliding[ServerEvent](16).map(nodeId -> _)).map(_.toMap)
-      stateMachines <- ZIO
-        .foreach(nodeIds)(nodeId =>
-          StateMachine(logEntry => ZIO.logAnnotate(NodeIdLogAnnotation, nodeId.id)(ZIO.log(s"Apply: $logEntry"))).map(nodeId -> _)
-        )
-        .map(_.toMap)
-      send = {
-        def doSend(nodeId: NodeId)(toNodeId: NodeId, msg: ToServerMessage): UIO[Unit] =
-          eventQueues(toNodeId)
-            .offer(
-              RequestReceived(
-                msg,
-                {
-                  case serverRspMsg: ToServerMessage => doSend(toNodeId)(nodeId, serverRspMsg)
-                  case _: ToClientMessage            => ZIO.unit // ignore
-                }
-              )
-            )
-            .unit
-        doSend _
-      }
-      electionTimeout = ZIO.random
-        .flatMap(_.nextIntBounded(electionRandomization))
-        .flatMap(randomization => ZIO.sleep(electionTimeoutDuration.plusMillis(randomization)))
-      heartbeatTimeout = ZIO.sleep(heartbeatTimeoutDuration)
-      persistence <- InMemoryPersistence(nodeIds)
-      nodes = nodeIds.toList
-        .map(nodeId =>
-          nodeId -> new Node(
-            nodeId,
-            eventQueues(nodeId),
-            send(nodeId),
-            stateMachines(nodeId),
-            nodeIds.toSet,
-            electionTimeout,
-            heartbeatTimeout,
-            persistence.forNodeId(nodeId)
-          )
-        )
-        .toMap
-      _ <- ZIO.log("E - exit; Nn data - send new entry <data> to node <n>; Kn - kill node n; Sn - start node n")
-      _ <- run(nodes, eventQueues)
-    } yield ()
-  }
-
-  private def nodeIdWithIndex(i: Int): NodeId = NodeId(s"node$i")
-
-  private def run(
-      nodes: Map[NodeId, Node],
-      queues: Map[NodeId, Queue[ServerEvent]]
-  ): IO[IOException, Unit] =
-    val newEntryPattern = "N(\\d+) (.+)".r
-    val killPattern = "K(\\d+)".r
-    val startPattern = "S(\\d+)".r
-
-    def doRun(fibers: Map[NodeId, Fiber.Runtime[Nothing, Unit]]): IO[IOException, Unit] =
-      Console.readLine.flatMap {
-        case "E" => ZIO.foreach(fibers.values)(f => f.interrupt) *> ZIO.log("Bye!")
-
-        case newEntryPattern(nodeNumber, newEntry) =>
-          val nodeId = nodeIdWithIndex(nodeNumber.toInt)
-          queues.get(nodeId) match
-            case None => ZIO.log(s"Unknown node: $nodeNumber") *> doRun(fibers)
-            case Some(queue) =>
-              queue.offer(RequestReceived(NewEntry(newEntry), responseMessage => ZIO.log(s"Response: $responseMessage"))).unit *> doRun(
-                fibers
-              )
-
-        case killPattern(nodeNumber) =>
-          val nodeId = nodeIdWithIndex(nodeNumber.toInt)
-          fibers.get(nodeId) match
-            case None        => ZIO.log(s"Node $nodeNumber is not started") *> doRun(fibers)
-            case Some(fiber) => fiber.interrupt *> doRun(fibers.removed(nodeId))
-
-        case startPattern(nodeNumber) =>
-          val nodeId = nodeIdWithIndex(nodeNumber.toInt)
-          (fibers.get(nodeId), nodes.get(nodeId)) match
-            case (None, Some(node)) => queues(nodeId).takeAll *> node.start.fork.flatMap(fiber => doRun(fibers + (nodeId -> fiber)))
-            case (_, None)          => ZIO.log(s"Unknown node: $nodeNumber") *> doRun(fibers)
-            case (Some(_), Some(_)) => ZIO.log(s"Node $nodeNumber is already started") *> doRun(fibers)
-
-        case _ => ZIO.log("Unknown command") *> doRun(fibers)
-      }
-
-    ZIO.foreach(nodes)((nodeId, node) => node.start.fork.map(nodeId -> _)).flatMap(doRun)
+private object Timer {
+  def apply(electionTimeout: UIO[Unit], heartbeatTimeout: UIO[Unit], queue: Enqueue[Timeout.type]): UIO[Timer] =
+    ZIO.never.fork.map(new Timer(electionTimeout, heartbeatTimeout, queue, _))
 }
