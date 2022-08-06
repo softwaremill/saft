@@ -5,7 +5,7 @@ import zio.*
 import java.io.IOException
 
 object SaftSim extends ZIOAppDefault with Logging {
-  def run: Task[Unit] = {
+  override def run: Task[Unit] = {
     // configuration
     val numberOfNodes = 5
     val electionTimeoutDuration = Duration.fromMillis(2000)
@@ -15,6 +15,11 @@ object SaftSim extends ZIOAppDefault with Logging {
 
     // setup nodes
     val nodeIds = (1 to numberOfNodes).map(nodeIdWithIndex)
+    val electionTimeout = ZIO.random
+      .flatMap(_.nextIntBounded(electionRandomization))
+      .flatMap(randomization => ZIO.sleep(electionTimeoutDuration.plusMillis(randomization))).as(Timeout)
+    val heartbeatTimeout = ZIO.sleep(heartbeatTimeoutDuration).as(Timeout)
+
     for {
       eventQueues <- ZIO.foreach(nodeIds)(nodeId => Queue.sliding[ServerEvent](16).map(nodeId -> _)).map(_.toMap)
       send = {
@@ -25,7 +30,7 @@ object SaftSim extends ZIOAppDefault with Logging {
                 msg,
                 {
                   case serverRspMsg: ToServerMessage => doSend(toNodeId)(nodeId, serverRspMsg)
-                  case _: ToClientMessage            => ZIO.unit // ignore
+                  case _: ToClientMessage            => ZIO.unit // ignore, as inter-node communication doesn't use client messages
                 }
               )
             )
@@ -33,10 +38,6 @@ object SaftSim extends ZIOAppDefault with Logging {
         doSend _
       }
       stateMachines <- ZIO.foreach(nodeIds)(nodeId => StateMachine.background(applyLogData(nodeId)).map(nodeId -> _)).map(_.toMap)
-      electionTimeout = ZIO.random
-        .flatMap(_.nextIntBounded(electionRandomization))
-        .flatMap(randomization => ZIO.sleep(electionTimeoutDuration.plusMillis(randomization)))
-      heartbeatTimeout = ZIO.sleep(heartbeatTimeoutDuration)
       persistence <- InMemoryPersistence(nodeIds)
       nodes = nodeIds.toList
         .map(nodeId =>

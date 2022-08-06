@@ -16,8 +16,8 @@ class Node(
     send: (NodeId, ToServerMessage) => UIO[Unit],
     stateMachine: StateMachine,
     nodes: Set[NodeId],
-    electionTimeout: UIO[Unit],
-    heartbeatTimeout: UIO[Unit],
+    electionTimeout: UIO[Timeout.type],
+    heartbeatTimeout: UIO[Timeout.type],
     persistence: Persistence
 ) {
   private val otherNodes = nodes - nodeId
@@ -231,18 +231,18 @@ class Node(
   *   timer.
   */
 private class Timer(
-    electionTimeout: UIO[Unit],
-    heartbeatTimeout: UIO[Unit],
+    electionTimeout: UIO[Timeout.type],
+    heartbeatTimeout: UIO[Timeout.type],
     queue: Enqueue[Timeout.type],
     currentTimer: Fiber.Runtime[Nothing, Boolean]
 ) {
-  private def restart(timeout: UIO[Unit]): UIO[Timer] =
-    currentTimer.interrupt *> (timeout *> queue.offer(Timeout)).fork.map(new Timer(electionTimeout, heartbeatTimeout, queue, _))
+  private def restart(timeout: UIO[Timeout.type]): UIO[Timer] =
+    currentTimer.interrupt *> timeout.flatMap(queue.offer).fork.map(new Timer(electionTimeout, heartbeatTimeout, queue, _))
   def restartElection: UIO[Timer] = restart(electionTimeout)
   def restartHeartbeat: UIO[Timer] = restart(heartbeatTimeout)
 }
 
 private object Timer {
-  def apply(electionTimeout: UIO[Unit], heartbeatTimeout: UIO[Unit], queue: Enqueue[Timeout.type]): UIO[Timer] =
+  def apply(electionTimeout: UIO[Timeout.type], heartbeatTimeout: UIO[Timeout.type], queue: Enqueue[Timeout.type]): UIO[Timer] =
     ZIO.never.fork.map(new Timer(electionTimeout, heartbeatTimeout, queue, _))
 }
