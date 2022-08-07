@@ -23,30 +23,14 @@ object SaftSim extends ZIOAppDefault with Logging {
     val heartbeatTimeout = ZIO.sleep(heartbeatTimeoutDuration).as(Timeout)
 
     for {
-      eventQueues <- ZIO.foreach(nodeIds)(nodeId => Queue.sliding[ServerEvent](16).map(nodeId -> _)).map(_.toMap)
-      send = {
-        def doSend(nodeId: NodeId)(toNodeId: NodeId, msg: ToServerMessage): UIO[Unit] =
-          eventQueues(toNodeId)
-            .offer(
-              RequestReceived(
-                msg,
-                {
-                  case serverRspMsg: ToServerMessage => doSend(toNodeId)(nodeId, serverRspMsg)
-                  case _: ToClientMessage            => ZIO.unit // ignore, as inter-node communication doesn't use client messages
-                }
-              )
-            )
-            .unit
-        doSend _
-      }
+      comms <- InMemoryComms(nodeIds)
       stateMachines <- ZIO.foreach(nodeIds)(nodeId => StateMachine.background(applyLogData(nodeId)).map(nodeId -> _)).map(_.toMap)
       persistence <- InMemoryPersistence(nodeIds)
       nodes = nodeIds.toList
         .map(nodeId =>
           nodeId -> new Node(
             nodeId,
-            eventQueues(nodeId),
-            send(nodeId),
+            comms(nodeId),
             stateMachines(nodeId),
             nodeIds.toSet,
             electionTimeout,
@@ -58,7 +42,7 @@ object SaftSim extends ZIOAppDefault with Logging {
       _ <- ZIO.log("Welcome to SaftSim - Scala Raft simulation. Available commands:")
       _ <- ZIO.log("E - exit; Nn data - send new entry <data> to node <n>; Kn - kill node n; Sn - start node n")
       // run interactive loop
-      _ <- handleCommands(nodes, eventQueues)
+      _ <- handleCommands(nodes, comms)
     } yield ()
   }
 
@@ -68,7 +52,7 @@ object SaftSim extends ZIOAppDefault with Logging {
 
   private def handleCommands(
       nodes: Map[NodeId, Node],
-      queues: Map[NodeId, Queue[ServerEvent]]
+      comms: Map[NodeId, InMemoryComms]
   ): IO[IOException, RunDone] =
     val newEntryPattern = "N(\\d+) (.+)".r
     val killPattern = "K(\\d+)".r
@@ -80,11 +64,11 @@ object SaftSim extends ZIOAppDefault with Logging {
 
         case newEntryPattern(nodeNumber, data) =>
           val nodeId = nodeIdWithIndex(nodeNumber.toInt)
-          queues.get(nodeId) match
+          comms.get(nodeId) match
             case None => ZIO.log(s"Unknown node: $nodeNumber") *> handleNextCommand(fibers)
-            case Some(queue) =>
-              queue
-                .offer(RequestReceived(NewEntry(LogData(data)), responseMessage => ZIO.log(s"Response: $responseMessage")))
+            case Some(comm) =>
+              comm
+                .add(RequestReceived(NewEntry(LogData(data)), responseMessage => ZIO.log(s"Response: $responseMessage")))
                 .unit *> handleNextCommand(fibers)
 
         case killPattern(nodeNumber) =>
@@ -97,7 +81,7 @@ object SaftSim extends ZIOAppDefault with Logging {
           val nodeId = nodeIdWithIndex(nodeNumber.toInt)
           (fibers.get(nodeId), nodes.get(nodeId)) match
             case (None, Some(node)) =>
-              queues(nodeId).takeAll *> node.start.fork.flatMap(fiber => handleNextCommand(fibers + (nodeId -> fiber)))
+              comms(nodeId).drain *> node.start.fork.flatMap(fiber => handleNextCommand(fibers + (nodeId -> fiber)))
             case (_, None)          => ZIO.log(s"Unknown node: $nodeNumber") *> handleNextCommand(fibers)
             case (Some(_), Some(_)) => ZIO.log(s"Node $nodeNumber is already started") *> handleNextCommand(fibers)
 
@@ -106,3 +90,30 @@ object SaftSim extends ZIOAppDefault with Logging {
 
     ZIO.foreach(nodes)((nodeId, node) => node.start.fork.map(nodeId -> _)).flatMap(handleNextCommand)
 }
+
+class InMemoryComms(nodeId: NodeId, eventQueues: Map[NodeId, Queue[ServerEvent]]) extends Comms:
+  private val eventQueue = eventQueues(nodeId)
+
+  override def nextEvent: UIO[ServerEvent] = eventQueue.take
+
+  override def send(toNodeId: NodeId, msg: ToServerMessage): UIO[Unit] = eventQueues(toNodeId)
+    .offer(
+      RequestReceived(
+        msg,
+        {
+          case serverRspMsg: ToServerMessage => new InMemoryComms(toNodeId, eventQueues).send(nodeId, serverRspMsg)
+          case _: ToClientMessage            => ZIO.unit // ignore, as inter-node communication doesn't use client messages
+        }
+      )
+    )
+    .unit
+
+  override def add(event: ServerEvent): UIO[Unit] = eventQueue.offer(event).unit
+
+  def drain: UIO[Unit] = eventQueue.takeAll.unit
+
+object InMemoryComms:
+  def apply(nodeIds: Seq[NodeId]): UIO[Map[NodeId, InMemoryComms]] =
+    ZIO.foreach(nodeIds)(nodeId => Queue.sliding[ServerEvent](16).map(nodeId -> _)).map(_.toMap).map { eventQueues =>
+      nodeIds.map(nodeId => nodeId -> new InMemoryComms(nodeId, eventQueues)).toMap
+    }

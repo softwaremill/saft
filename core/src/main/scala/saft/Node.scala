@@ -4,16 +4,10 @@ import zio.*
 
 import java.io.IOException
 
-/** A Raft node. Communicates with the outside world using [[events]] and [[send]]. Committed logs are applied to [[stateMachine]].
-  * @param events
-  *   The event queue for this node, with incoming events.
-  * @param send
-  *   Used for inter-node communication. Sends the given message to the given node.
-  */
+/** A Raft node. Communicates with the outside world using [[comms]]. Committed logs are applied to [[stateMachine]]. */
 class Node(
     nodeId: NodeId,
-    events: Queue[ServerEvent],
-    send: (NodeId, ToServerMessage) => UIO[Unit],
+    comms: Comms,
     stateMachine: StateMachine,
     nodes: Set[NodeId],
     electionTimeout: UIO[Timeout.type],
@@ -26,7 +20,7 @@ class Node(
   def start: UIO[Nothing] =
     setLogAnnotation(NodeIdLogAnnotation, nodeId.id) *>
       ZIO.log("Node started") *>
-      Timer(electionTimeout, heartbeatTimeout, events)
+      Timer(electionTimeout, heartbeatTimeout, comms)
         .flatMap(_.restartElection)
         .flatMap(timer => persistence.get.flatMap(state => follower(state, FollowerState(None), timer)))
         .onExit(_ => ZIO.log("Node stopped"))
@@ -139,8 +133,8 @@ class Node(
     )
 
     // Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server
-    ZIO.log(s"Became leader (${state.currentTerm})") *> sendAppendEntries(state, leaderState, timer).flatMap(newTimer =>
-      leader(state, leaderState, newTimer)
+    ZIO.log(s"Became leader (${state.currentTerm})") *> sendAppendEntries(state, leaderState, timer).flatMap(timer2 =>
+      leader(state, leaderState, timer2)
     )
   }
 
@@ -206,7 +200,7 @@ class Node(
     }
 
   private def nextEvent(state: ServerState, timer: Timer)(next: ServerEvent => UIO[Nothing]): UIO[Nothing] =
-    events.take.flatMap {
+    comms.nextEvent.flatMap {
       // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
       case e @ RequestReceived(msg: FromServerMessage, _) if msg.term > state.currentTerm =>
         val state2 = state.updateTerm(msg.term)
@@ -214,7 +208,7 @@ class Node(
       case e => next(e)
     }
 
-  private def doSend(to: NodeId, msg: ToServerMessage): UIO[Unit] = ZIO.logDebug(s"Send to ${to.id}: $msg") *> send(to, msg)
+  private def doSend(to: NodeId, msg: ToServerMessage): UIO[Unit] = ZIO.logDebug(s"Send to ${to.id}: $msg") *> comms.send(to, msg)
   private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.logDebug(s"Response: $msg") *> respond(msg)
 
 /** @param electionTimeout
@@ -228,14 +222,14 @@ class Node(
 private class Timer(
     electionTimeout: UIO[Timeout.type],
     heartbeatTimeout: UIO[Timeout.type],
-    queue: Enqueue[Timeout.type],
-    currentTimer: Fiber.Runtime[Nothing, Boolean]
+    comms: Comms,
+    currentTimer: Fiber.Runtime[Nothing, Unit]
 ):
   private def restart(timeout: UIO[Timeout.type]): UIO[Timer] =
-    currentTimer.interrupt *> timeout.flatMap(queue.offer).fork.map(new Timer(electionTimeout, heartbeatTimeout, queue, _))
+    currentTimer.interrupt *> timeout.flatMap(comms.add).fork.map(new Timer(electionTimeout, heartbeatTimeout, comms, _))
   def restartElection: UIO[Timer] = restart(electionTimeout)
   def restartHeartbeat: UIO[Timer] = restart(heartbeatTimeout)
 
 private object Timer:
-  def apply(electionTimeout: UIO[Timeout.type], heartbeatTimeout: UIO[Timeout.type], queue: Enqueue[Timeout.type]): UIO[Timer] =
-    ZIO.never.fork.map(new Timer(electionTimeout, heartbeatTimeout, queue, _))
+  def apply(electionTimeout: UIO[Timeout.type], heartbeatTimeout: UIO[Timeout.type], comms: Comms): UIO[Timer] =
+    ZIO.never.fork.map(new Timer(electionTimeout, heartbeatTimeout, comms, _))
