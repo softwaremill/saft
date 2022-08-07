@@ -9,9 +9,10 @@ sealed trait ToServerMessage extends Message
 sealed trait FromServerMessage extends Message:
   def term: Term
 
-/** A message that can be sent to a client.. */
+/** A message that can be sent to a client. */
 sealed trait ToClientMessage extends Message
 
+/** A message that is a request. */
 sealed trait RequestMessage extends Message
 
 /** A message that is a response, either to a client or a server. */

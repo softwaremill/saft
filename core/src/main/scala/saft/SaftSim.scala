@@ -75,7 +75,7 @@ private class InMemoryComms(nodeId: NodeId, eventQueues: Map[NodeId, Queue[Serve
 
   override def nextEvent: UIO[ServerEvent] = eventQueue.take
 
-  override def send(toNodeId: NodeId, msg: ToServerMessage with RequestMessage): UIO[Unit] =
+  override def send(toNodeId: NodeId, msg: RequestMessage with FromServerMessage): UIO[Unit] =
     eventQueues(toNodeId)
       .offer(
         RequestReceived(

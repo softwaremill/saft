@@ -46,7 +46,7 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
       queue <- Queue.sliding[ServerEvent](16)
       comms = new Comms {
         override def nextEvent: UIO[ServerEvent] = queue.take
-        override def send(toNodeId: NodeId, msg: RequestMessage with ToServerMessage): UIO[Unit] =
+        override def send(toNodeId: NodeId, msg: RequestMessage with FromServerMessage): UIO[Unit] =
           Client
             .request(
               url = s"http://localhost:${nodePort(toNodeId)}/${endpoint(msg)}",
@@ -120,9 +120,8 @@ private trait JsonCodecs {
     case r: AppendEntries => r.toJson
     case r: NewEntry      => r.toJson
 
-  def decodeResponse(toRequest: RequestMessage with ToServerMessage, data: String): Either[String, ResponseMessage with ToServerMessage] =
+  def decodeResponse(toRequest: RequestMessage with FromServerMessage, data: String): Either[String, ResponseMessage with ToServerMessage] =
     toRequest match
       case _: RequestVote   => data.fromJson[RequestVoteResponse]
       case _: AppendEntries => data.fromJson[AppendEntriesResponse]
-      case _: NewEntry      => ??? // TODO
 }

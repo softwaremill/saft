@@ -206,7 +206,7 @@ class Node(
       case e => next(e)
     }
 
-  private def doSend(to: NodeId, msg: RequestMessage with ToServerMessage): UIO[Unit] =
+  private def doSend(to: NodeId, msg: RequestMessage with FromServerMessage): UIO[Unit] =
     ZIO.logDebug(s"Send to node${to.number}: $msg") *> comms.send(to, msg)
   private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.logDebug(s"Response: $msg") *> respond(msg)
 
