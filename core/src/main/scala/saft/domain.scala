@@ -1,6 +1,6 @@
 package saft
 
-case class NodeId(id: String)
+case class NodeId(number: Int)
 
 opaque type Term <: Int = Int
 object Term:

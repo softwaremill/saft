@@ -12,10 +12,10 @@ object SaftSim extends ZIOAppDefault with Logging {
     val electionTimeoutDuration = Duration.fromMillis(2000)
     val heartbeatTimeoutDuration = Duration.fromMillis(500)
     val electionRandomization = 500
-    val applyLogData = (nodeId: NodeId) => (data: LogData) => ZIO.logAnnotate(NodeIdLogAnnotation, nodeId.id)(ZIO.log(s"Apply: $data"))
+    val applyLogData = (nodeId: NodeId) => (data: LogData) => setNodeLogAnnotation(nodeId) *> ZIO.log(s"Apply: $data")
 
     // setup nodes
-    val nodeIds = (1 to numberOfNodes).map(nodeIdWithIndex)
+    val nodeIds = (1 to numberOfNodes).map(NodeId.apply)
     val electionTimeout = ZIO.random
       .flatMap(_.nextIntBounded(electionRandomization))
       .flatMap(randomization => ZIO.sleep(electionTimeoutDuration.plusMillis(randomization)))
@@ -46,8 +46,6 @@ object SaftSim extends ZIOAppDefault with Logging {
     } yield ()
   }
 
-  private def nodeIdWithIndex(i: Int): NodeId = NodeId(s"node$i")
-
   private case class RunDone()
 
   private def handleCommands(
@@ -63,7 +61,7 @@ object SaftSim extends ZIOAppDefault with Logging {
         case "E" => ZIO.foreach(fibers.values)(f => f.interrupt) *> ZIO.log("Bye!") *> ZIO.succeed(RunDone())
 
         case newEntryPattern(nodeNumber, data) =>
-          val nodeId = nodeIdWithIndex(nodeNumber.toInt)
+          val nodeId = NodeId(nodeNumber.toInt)
           comms.get(nodeId) match
             case None => ZIO.log(s"Unknown node: $nodeNumber") *> handleNextCommand(fibers)
             case Some(comm) =>
@@ -72,13 +70,13 @@ object SaftSim extends ZIOAppDefault with Logging {
                 .unit *> handleNextCommand(fibers)
 
         case killPattern(nodeNumber) =>
-          val nodeId = nodeIdWithIndex(nodeNumber.toInt)
+          val nodeId = NodeId(nodeNumber.toInt)
           fibers.get(nodeId) match
             case None        => ZIO.log(s"Node $nodeNumber is not started") *> handleNextCommand(fibers)
             case Some(fiber) => fiber.interrupt *> handleNextCommand(fibers.removed(nodeId))
 
         case startPattern(nodeNumber) =>
-          val nodeId = nodeIdWithIndex(nodeNumber.toInt)
+          val nodeId = NodeId(nodeNumber.toInt)
           (fibers.get(nodeId), nodes.get(nodeId)) match
             case (None, Some(node)) =>
               comms(nodeId).drain *> node.start.fork.flatMap(fiber => handleNextCommand(fibers + (nodeId -> fiber)))
@@ -91,7 +89,7 @@ object SaftSim extends ZIOAppDefault with Logging {
     ZIO.foreach(nodes)((nodeId, node) => node.start.fork.map(nodeId -> _)).flatMap(handleNextCommand)
 }
 
-class InMemoryComms(nodeId: NodeId, eventQueues: Map[NodeId, Queue[ServerEvent]]) extends Comms:
+private class InMemoryComms(nodeId: NodeId, eventQueues: Map[NodeId, Queue[ServerEvent]]) extends Comms:
   private val eventQueue = eventQueues(nodeId)
 
   override def nextEvent: UIO[ServerEvent] = eventQueue.take
@@ -112,20 +110,8 @@ class InMemoryComms(nodeId: NodeId, eventQueues: Map[NodeId, Queue[ServerEvent]]
 
   def drain: UIO[Unit] = eventQueue.takeAll.unit
 
-object InMemoryComms:
+private object InMemoryComms:
   def apply(nodeIds: Seq[NodeId]): UIO[Map[NodeId, InMemoryComms]] =
     ZIO.foreach(nodeIds)(nodeId => Queue.sliding[ServerEvent](16).map(nodeId -> _)).map(_.toMap).map { eventQueues =>
       nodeIds.map(nodeId => nodeId -> new InMemoryComms(nodeId, eventQueues)).toMap
     }
-
-class InMemoryPersistence(refs: Map[NodeId, Ref[ServerState]]):
-  def forNodeId(nodeId: NodeId): Persistence = new Persistence {
-    private val ref = refs(nodeId)
-    override def apply(oldState: ServerState, newState: ServerState): UIO[Unit] =
-      ref.set(newState.copy(commitIndex = None, lastApplied = None))
-    override def get: UIO[ServerState] = ref.get
-  }
-
-object InMemoryPersistence:
-  def apply(nodeIds: Seq[NodeId]): UIO[InMemoryPersistence] =
-    ZIO.foreach(nodeIds.toList)(nodeId => Ref.make(ServerState.Initial).map(nodeId -> _)).map(_.toMap).map(new InMemoryPersistence(_))

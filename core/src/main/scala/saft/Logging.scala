@@ -9,9 +9,10 @@ import java.nio.file.Paths
 import java.time.format.{DateTimeFormatter, FormatStyle}
 
 val StateLogAnnotation = "state"
-val NodeIdLogAnnotation = "nodeId"
+private val NodeIdLogAnnotation = "nodeId"
 
 def setLogAnnotation(key: String, value: String): UIO[Unit] = FiberRef.currentLogAnnotations.update(_ + (key -> value))
+def setNodeLogAnnotation(nodeId: NodeId): UIO[Unit] = setLogAnnotation(NodeIdLogAnnotation, "node" + nodeId.number)
 
 trait Logging { this: ZIOAppDefault =>
   private val logFormat = timestamp(DateTimeFormatter.ofLocalizedDateTime(FormatStyle.LONG)).fixed(32).color(LogColor.BLUE) |-|

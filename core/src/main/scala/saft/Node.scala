@@ -18,7 +18,7 @@ class Node(
   private val majority = math.ceil(nodes.size.toDouble / 2).toInt
 
   def start: UIO[Nothing] =
-    setLogAnnotation(NodeIdLogAnnotation, nodeId.id) *>
+    setNodeLogAnnotation(nodeId) *>
       ZIO.log("Node started") *>
       Timer(electionTimeout, heartbeatTimeout, comms)
         .flatMap(_.restartElection)
@@ -208,7 +208,7 @@ class Node(
       case e => next(e)
     }
 
-  private def doSend(to: NodeId, msg: ToServerMessage): UIO[Unit] = ZIO.logDebug(s"Send to ${to.id}: $msg") *> comms.send(to, msg)
+  private def doSend(to: NodeId, msg: ToServerMessage): UIO[Unit] = ZIO.logDebug(s"Send to node${to.number}: $msg") *> comms.send(to, msg)
   private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.logDebug(s"Response: $msg") *> respond(msg)
 
 /** @param electionTimeout
