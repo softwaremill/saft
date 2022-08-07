@@ -9,28 +9,8 @@ object SaftHttp1 extends SaftHttp(1)
 object SaftHttp2 extends SaftHttp(2)
 object SaftHttp3 extends SaftHttp(3)
 
+/** A Raft implementation using json-over-http for inter-node communication. */
 class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Logging {
-  def decodingEndpoint[T <: RequestMessage with ToServerMessage](
-      request: Request,
-      decode: String => Either[String, T],
-      queue: Queue[ServerEvent]
-  ): Task[Response] =
-    request.bodyAsString.map(decode).flatMap {
-      case Right(msg) =>
-        for {
-          p <- Promise.make[Nothing, ResponseMessage]
-          _ <- queue.offer(RequestReceived(msg, r => p.succeed(r).unit))
-          r <- p.await.timeoutFail(new RuntimeException("Timed out"))(Duration.fromSeconds(5))
-        } yield Response.text(encodeResponse(r))
-      case Left(error) => ZIO.succeed(Response.text(error).setStatus(Status.BadRequest))
-    }
-
-  def app(queue: Queue[ServerEvent]): HttpApp[Any, Throwable] = Http.collectZIO[Request] {
-    case r @ Method.POST -> !! / "append-entries" => decodingEndpoint(r, _.fromJson[AppendEntries], queue)
-    case r @ Method.POST -> !! / "request-vote"   => decodingEndpoint(r, _.fromJson[RequestVote], queue)
-    case r @ Method.POST -> !! / "new-entry"      => decodingEndpoint(r, _.fromJson[NewEntry], queue)
-  }
-
   override val run: Task[Nothing] =
     // configuration
     val conf = Conf.default(3)
@@ -51,7 +31,7 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
             .request(
               url = s"http://localhost:${nodePort(toNodeId)}/${endpoint(msg)}",
               method = Method.POST,
-              content = HttpData.fromString(encodeRequestMessage(msg))
+              content = HttpData.fromString(encodeRequest(msg))
             )
             .provide(clientEnv)
             .timeoutFail(new RuntimeException("Timed out"))(Duration.fromSeconds(5))
@@ -75,10 +55,35 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
 
   private def nodePort(nodeId: NodeId): Int = 8080 + nodeId.number
 
+  private def decodingEndpoint[T <: RequestMessage with ToServerMessage](
+      request: Request,
+      decode: String => Either[String, T],
+      queue: Queue[ServerEvent]
+  ): Task[Response] =
+    request.bodyAsString.map(decode).flatMap {
+      case Right(msg) =>
+        for {
+          p <- Promise.make[Nothing, ResponseMessage]
+          _ <- queue.offer(RequestReceived(msg, r => p.succeed(r).unit))
+          r <- p.await.timeoutFail(new RuntimeException("Timed out"))(Duration.fromSeconds(5))
+        } yield Response.text(encodeResponse(r))
+      case Left(error) => ZIO.succeed(Response.text(error).setStatus(Status.BadRequest))
+    }
+
+  val AppendEntriesEndpoint = "append-entries"
+  val RequestVoteEndpoint = "request-vote"
+  val NewEntryEndpoint = "new-entry"
+
+  private def app(queue: Queue[ServerEvent]): HttpApp[Any, Throwable] = Http.collectZIO[Request] {
+    case r @ Method.POST -> !! / AppendEntriesEndpoint => decodingEndpoint(r, _.fromJson[AppendEntries], queue)
+    case r @ Method.POST -> !! / RequestVoteEndpoint   => decodingEndpoint(r, _.fromJson[RequestVote], queue)
+    case r @ Method.POST -> !! / NewEntryEndpoint      => decodingEndpoint(r, _.fromJson[NewEntry], queue)
+  }
+
   private def endpoint(msg: RequestMessage): String = msg match
-    case _: RequestVote   => "request-vote"
-    case _: AppendEntries => "append-entries"
-    case _: NewEntry      => "new-entry"
+    case _: AppendEntries => AppendEntriesEndpoint
+    case _: RequestVote   => RequestVoteEndpoint
+    case _: NewEntry      => NewEntryEndpoint
 }
 
 private trait JsonCodecs {
@@ -115,7 +120,7 @@ private trait JsonCodecs {
     case r: NewEntryAddedResponse.type => r.toJson
     case r: RedirectToLeaderResponse   => r.toJson
 
-  def encodeRequestMessage(m: RequestMessage): String = m match
+  def encodeRequest(m: RequestMessage): String = m match
     case r: RequestVote   => r.toJson
     case r: AppendEntries => r.toJson
     case r: NewEntry      => r.toJson
