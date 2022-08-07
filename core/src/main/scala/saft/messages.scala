@@ -2,26 +2,23 @@ package saft
 
 sealed trait Message
 
-/** A message that can be sent to a server. */
+/** A message (request or response) that can be sent to a server. */
 sealed trait ToServerMessage extends Message
 
-/** A message that can be sent from a server. */
+/** A message (request or response) that can be sent from a server. */
 sealed trait FromServerMessage extends Message:
   def term: Term
 
-/** A message that can be sent to a client. */
-sealed trait ToClientMessage extends Message
-
-/** A message that is a request. */
-sealed trait RequestMessage extends Message
+/** A message that is a request; always to a server. */
+sealed trait RequestMessage extends ToServerMessage
 
 /** A message that is a response, either to a client or a server. */
 sealed trait ResponseMessage extends Message
 
-case class RequestVote(term: Term, candidateId: NodeId, lastLog: Option[LogIndexTerm])
-    extends ToServerMessage
-    with FromServerMessage
-    with RequestMessage
+/** A message that can be sent to a client; always a response. */
+sealed trait ToClientMessage extends ResponseMessage
+
+case class RequestVote(term: Term, candidateId: NodeId, lastLog: Option[LogIndexTerm]) extends RequestMessage with FromServerMessage
 case class RequestVoteResponse(term: Term, voteGranted: Boolean) extends ResponseMessage with ToServerMessage with FromServerMessage
 
 case class AppendEntries(
@@ -30,9 +27,8 @@ case class AppendEntries(
     prevLog: Option[LogIndexTerm],
     entries: Vector[LogEntry],
     leaderCommit: Option[LogIndex]
-) extends ToServerMessage
+) extends RequestMessage
     with FromServerMessage
-    with RequestMessage
 
 /** The extra [[followerId]], [[prevLog]] and [[entryCount]] are needed to correlate the response & request, so that the leader can update
   * [[LeaderState.nextIndex]] and [[LeaderState.matchIndex]] appropriately. Given an [[AppendEntries]] request message, a response can be
@@ -50,8 +46,8 @@ object AppendEntriesResponse:
   def to(followerId: NodeId, appendEntries: AppendEntries)(term: Term, success: Boolean): AppendEntriesResponse =
     AppendEntriesResponse(term, success, followerId, appendEntries.prevLog, appendEntries.entries.length)
 
-case class NewEntry(data: LogData) extends ToServerMessage with RequestMessage
-case object NewEntryAddedResponse extends ResponseMessage with ToClientMessage
+case class NewEntry(data: LogData) extends RequestMessage
+case object NewEntryAddedResponse extends ToClientMessage
 
 /** Response sent in case a [[NewEntry]] is received by a non-leader node. */
-case class RedirectToLeaderResponse(leaderId: Option[NodeId]) extends ResponseMessage with ToClientMessage
+case class RedirectToLeaderResponse(leaderId: Option[NodeId]) extends ToClientMessage
