@@ -5,6 +5,10 @@ import zio.json.*
 import zhttp.http.*
 import zhttp.service.{ChannelFactory, Client, EventLoopGroup, Server}
 
+object SaftHttp1 extends SaftHttp(1)
+object SaftHttp2 extends SaftHttp(2)
+object SaftHttp3 extends SaftHttp(3)
+
 class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Logging {
   def decodingEndpoint[T <: RequestMessage with ToServerMessage](
       request: Request,
@@ -47,7 +51,7 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
             .request(
               url = s"http://localhost:${nodePort(toNodeId)}/${endpoint(msg)}",
               method = Method.POST,
-              content = HttpData.fromString(encodeToServerMessage(msg))
+              content = HttpData.fromString(encodeRequestMessage(msg))
             )
             .provide(clientEnv)
             .timeoutFail(new RuntimeException("Timed out"))(Duration.fromSeconds(5))
@@ -71,17 +75,11 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
 
   private def nodePort(nodeId: NodeId): Int = 8080 + nodeId.number
 
-  private def endpoint(msg: ToServerMessage): String = msg match
-    case r: RequestVote           => "request-vote"
-    case r: RequestVoteResponse   => ???
-    case r: AppendEntries         => "append-entries"
-    case r: AppendEntriesResponse => ???
-    case r: NewEntry              => "new-entry"
+  private def endpoint(msg: RequestMessage): String = msg match
+    case r: RequestVote   => "request-vote"
+    case r: AppendEntries => "append-entries"
+    case r: NewEntry      => "new-entry"
 }
-
-object SaftHttp1 extends SaftHttp(1)
-object SaftHttp2 extends SaftHttp(2)
-object SaftHttp3 extends SaftHttp(3)
 
 private trait JsonCodecs {
   given JsonDecoder[Term] = JsonDecoder[Int].map(Term(_))
@@ -117,12 +115,10 @@ private trait JsonCodecs {
     case r: NewEntryAddedResponse.type => r.toJson
     case r: RedirectToLeaderResponse   => r.toJson
 
-  def encodeToServerMessage(m: ToServerMessage): String = m match
-    case r: RequestVote           => r.toJson
-    case r: RequestVoteResponse   => r.toJson
-    case r: AppendEntries         => r.toJson
-    case r: AppendEntriesResponse => r.toJson
-    case r: NewEntry              => r.toJson
+  def encodeRequestMessage(m: RequestMessage): String = m match
+    case r: RequestVote   => r.toJson
+    case r: AppendEntries => r.toJson
+    case r: NewEntry      => r.toJson
 
   def decodeResponse(toRequest: RequestMessage with ToServerMessage, data: String): Either[String, ResponseMessage with ToServerMessage] =
     toRequest match
