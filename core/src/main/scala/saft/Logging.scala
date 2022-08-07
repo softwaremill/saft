@@ -2,9 +2,10 @@ package saft
 
 import zio.*
 import zio.ZIOAppDefault
-import zio.logging.{LogColor, LogFormat, console}
+import zio.logging.{LogColor, LogFormat, console, file}
 import zio.logging.LogFormat.*
 
+import java.nio.file.Paths
 import java.time.format.{DateTimeFormatter, FormatStyle}
 
 val StateLogAnnotation = "state"
@@ -28,5 +29,7 @@ trait Logging { this: ZIOAppDefault =>
       }
     }
 
-  override val bootstrap: ZLayer[Any, Nothing, Unit] = Runtime.removeDefaultLoggers >>> console(logFormat, LogLevel.Info)
+  override val bootstrap: ZLayer[Any, Nothing, Unit] = Runtime.removeDefaultLoggers >>>
+    console(logFormat, LogLevel.Info) >>>
+    file(Paths.get("saft.log"), logFormat, LogLevel.Debug)
 }

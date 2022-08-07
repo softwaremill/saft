@@ -63,23 +63,21 @@ case class LeaderState(
     matchIndex: Map[NodeId, Option[LogIndex]],
     awaitingResponses: Vector[(LogIndex, UIO[Unit])]
 ):
-  def appendSuccessful(nodeId: NodeId, lastIndex: Option[LogIndex]): LeaderState = lastIndex match
-    case Some(last) =>
-      LeaderState(
-        nextIndex.updated(nodeId, LogIndex(math.max(nextIndex(nodeId), last + 1))),
-        matchIndex.updated(nodeId, Some(LogIndex(math.max(matchIndex(nodeId).getOrElse(-1), last)))),
-        awaitingResponses
-      )
-    case None => this
+  def appendSuccessful(nodeId: NodeId, prevLog: Option[LogIndexTerm], entryCount: Int): LeaderState =
+    val lastReplicated = prevLog.map(_.index).getOrElse(-1) + entryCount // -1 means None
+    val nodeMatchIndex = math.max(matchIndex(nodeId).getOrElse(-1), lastReplicated) // -1 means None
+    LeaderState(
+      nextIndex.updated(nodeId, LogIndex(math.max(nextIndex(nodeId), lastReplicated + 1))),
+      matchIndex.updated(nodeId, if nodeMatchIndex == -1 then None else Some(LogIndex(nodeMatchIndex))),
+      awaitingResponses
+    )
 
-  def appendFailed(nodeId: NodeId, firstIndex: Option[LogIndex]): LeaderState = firstIndex match
-    case Some(first) =>
-      LeaderState(
-        nextIndex.updated(nodeId, LogIndex(math.min(nextIndex(nodeId), first - 1))),
-        matchIndex,
-        awaitingResponses
-      )
-    case None => this
+  def appendFailed(nodeId: NodeId, prevLog: Option[LogIndexTerm]): LeaderState =
+    LeaderState(
+      nextIndex.updated(nodeId, LogIndex(math.min(nextIndex(nodeId), prevLog.map(_.index).getOrElse(0)))),
+      matchIndex,
+      awaitingResponses
+    )
 
   def commitIndex(ourIndex: Option[LogIndex], majority: Int): Option[LogIndex] =
     val indexes = (ourIndex :: matchIndex.values.toList).flatten

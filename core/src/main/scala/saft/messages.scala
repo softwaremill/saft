@@ -27,29 +27,21 @@ case class AppendEntries(
 ) extends ToServerMessage
     with FromServerMessage
 
-/** The extra [[followerId]] and [[entryIndexRange]] are needed to correlate the response & request, so that the leader can update
-  * [[ServerState.nextIndex]] appropriately. Given an [[AppendEntries]] request message, a response can be created using
-  * [[AppendEntriesResponse.to]].
+/** The extra [[followerId]], [[prevLog]] and [[entryCount]] are needed to correlate the response & request, so that the leader can update
+  * [[LeaderState.nextIndex]] and [[LeaderState.matchIndex]] appropriately. Given an [[AppendEntries]] request message, a response can be
+  * created using [[AppendEntriesResponse.to]].
   * @param followerId
   *   The id of the node which responds to the append entries request.
-  * @param entryIndexRange
-  *   The range of log indexes that have been included in the [[AppendEntries]] request, and have either been accepted or rejected by the
-  *   follower, depending on [[success]] value.
+  * @param entryCount
+  *   The number of entries sent using [[AppendEntries]].
   */
-case class AppendEntriesResponse(term: Term, success: Boolean, followerId: NodeId, entryIndexRange: Option[(LogIndex, LogIndex)])
+case class AppendEntriesResponse(term: Term, success: Boolean, followerId: NodeId, prevLog: Option[LogIndexTerm], entryCount: Int)
     extends ResponseMessage
     with ToServerMessage
     with FromServerMessage
 object AppendEntriesResponse:
   def to(followerId: NodeId, appendEntries: AppendEntries)(term: Term, success: Boolean): AppendEntriesResponse =
-    AppendEntriesResponse(
-      term,
-      success,
-      followerId, {
-        val firstIndex = appendEntries.entries.headOption.map(_ => LogIndex(appendEntries.prevLog.map(_.index).getOrElse(-1) + 1))
-        firstIndex.map(f => (f, LogIndex(f + appendEntries.entries.length - 1)))
-      }
-    )
+    AppendEntriesResponse(term, success, followerId, appendEntries.prevLog, appendEntries.entries.length)
 
 case class NewEntry(data: LogData) extends ToServerMessage
 case object NewEntryAddedResponse extends ResponseMessage with ToClientMessage

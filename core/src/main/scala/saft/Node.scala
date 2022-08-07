@@ -133,7 +133,7 @@ class Node(
     )
 
     // Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server
-    ZIO.log(s"Became leader (${state.currentTerm})") *> sendAppendEntries(state, leaderState, timer).flatMap(timer2 =>
+    ZIO.log(s"Became leader (term: ${state.currentTerm})") *> sendAppendEntries(state, leaderState, timer).flatMap(timer2 =>
       leader(state, leaderState, timer2)
     )
   }
@@ -151,11 +151,11 @@ class Node(
         persistence(state, state2) *> sendAppendEntries(state2, leaderState2, timer).flatMap(leader(state2, leaderState2, _))
 
       // If successful: update nextIndex and matchIndex for follower (§5.3)
-      case RequestReceived(AppendEntriesResponse(_, true, followerId, range), _) =>
-        val leaderState2 = leaderState.appendSuccessful(followerId, range.map(_._2))
+      case RequestReceived(AppendEntriesResponse(_, true, followerId, prevLog, entryCount), _) =>
+        val leaderState2 = leaderState.appendSuccessful(followerId, prevLog, entryCount)
         // If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
-        val newCommitIndex = leaderState.commitIndex(if state.log.isEmpty then None else Some(LogIndex(state.log.length - 1)), majority)
-        if state.commitIndex != newCommitIndex
+        val newCommitIndex = leaderState2.commitIndex(if state.log.isEmpty then None else Some(LogIndex(state.log.length - 1)), majority)
+        if newCommitIndex.exists(_ > state.commitIndex.getOrElse(-1)) && state.log.lastOption.map(_.term).contains(state.currentTerm)
         then
           val state2 = state.commitIndex(newCommitIndex)
           val (leaderState3, responses) = newCommitIndex match
@@ -169,8 +169,8 @@ class Node(
         else leader(state, leaderState2, timer)
 
       // If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
-      case RequestReceived(AppendEntriesResponse(_, false, followerId, range), _) =>
-        val leaderState2 = leaderState.appendFailed(followerId, range.map(_._1))
+      case RequestReceived(AppendEntriesResponse(_, false, followerId, prevLog, _), _) =>
+        val leaderState2 = leaderState.appendFailed(followerId, prevLog)
         sendAppendEntry(followerId, state, leaderState2) *> leader(state, leaderState2, timer)
 
       // ignore
