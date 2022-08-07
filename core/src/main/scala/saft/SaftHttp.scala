@@ -6,7 +6,7 @@ import zhttp.http.*
 import zhttp.service.{ChannelFactory, Client, EventLoopGroup, Server}
 
 class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Logging {
-  def decodingEndpoint[T <: ToServerMessage](
+  def decodingEndpoint[T <: RequestMessage with ToServerMessage](
       request: Request,
       decode: String => Either[String, T],
       queue: Queue[ServerEvent]
@@ -42,7 +42,7 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
       queue <- Queue.sliding[ServerEvent](16)
       comms = new Comms {
         override def nextEvent: UIO[ServerEvent] = queue.take
-        override def send(toNodeId: NodeId, msg: ToServerMessage): UIO[Unit] =
+        override def send(toNodeId: NodeId, msg: RequestMessage with ToServerMessage): UIO[Unit] =
           Client
             .request(
               url = s"http://localhost:${nodePort(toNodeId)}/${endpoint(msg)}",
@@ -55,7 +55,7 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
             .flatMap { body =>
               decodeResponse(msg, body) match
                 case Left(value)    => ???
-                case Right(decoded) => queue.offer(RequestReceived(decoded, _ => ZIO.unit))
+                case Right(decoded) => queue.offer(ResponseReceived(decoded))
             }
             .unit
             .catchAll { case e: Exception => ZIO.logErrorCause(s"Cannot send $msg to $toNodeId", Cause.fail(e)) }
@@ -124,10 +124,9 @@ private trait JsonCodecs {
     case r: AppendEntriesResponse => r.toJson
     case r: NewEntry              => r.toJson
 
-  def decodeResponse(toRequest: ToServerMessage, data: String): Either[String, ToServerMessage] = toRequest match
-    case r: RequestVote           => data.fromJson[RequestVoteResponse]
-    case r: AppendEntries         => data.fromJson[AppendEntriesResponse]
-    case r: NewEntry              => ???
-    case r: RequestVoteResponse   => ???
-    case r: AppendEntriesResponse => ???
+  def decodeResponse(toRequest: RequestMessage with ToServerMessage, data: String): Either[String, ResponseMessage with ToServerMessage] =
+    toRequest match
+      case _: RequestVote   => data.fromJson[RequestVoteResponse]
+      case _: AppendEntries => data.fromJson[AppendEntriesResponse]
+      case _: NewEntry      => ??? // TODO
 }

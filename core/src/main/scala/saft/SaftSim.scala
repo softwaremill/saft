@@ -75,17 +75,18 @@ private class InMemoryComms(nodeId: NodeId, eventQueues: Map[NodeId, Queue[Serve
 
   override def nextEvent: UIO[ServerEvent] = eventQueue.take
 
-  override def send(toNodeId: NodeId, msg: ToServerMessage): UIO[Unit] = eventQueues(toNodeId)
-    .offer(
-      RequestReceived(
-        msg,
-        {
-          case serverRspMsg: ToServerMessage => new InMemoryComms(toNodeId, eventQueues).send(nodeId, serverRspMsg)
-          case _: ToClientMessage            => ZIO.unit // ignore, as inter-node communication doesn't use client messages
-        }
+  override def send(toNodeId: NodeId, msg: ToServerMessage with RequestMessage): UIO[Unit] =
+    eventQueues(toNodeId)
+      .offer(
+        RequestReceived(
+          msg,
+          {
+            case serverMsg: ToServerMessage => eventQueues(nodeId).offer(ResponseReceived(serverMsg)).unit
+            case _                          => ZIO.unit // ignore, as inter-node communication doesn't use client messages
+          }
+        )
       )
-    )
-    .unit
+      .unit
 
   override def add(event: ServerEvent): UIO[Unit] = eventQueue.offer(event).unit
 

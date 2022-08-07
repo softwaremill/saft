@@ -12,10 +12,15 @@ sealed trait FromServerMessage extends Message:
 /** A message that can be sent to a client.. */
 sealed trait ToClientMessage extends Message
 
+sealed trait RequestMessage extends Message
+
 /** A message that is a response, either to a client or a server. */
 sealed trait ResponseMessage extends Message
 
-case class RequestVote(term: Term, candidateId: NodeId, lastLog: Option[LogIndexTerm]) extends ToServerMessage with FromServerMessage
+case class RequestVote(term: Term, candidateId: NodeId, lastLog: Option[LogIndexTerm])
+    extends ToServerMessage
+    with FromServerMessage
+    with RequestMessage
 case class RequestVoteResponse(term: Term, voteGranted: Boolean) extends ResponseMessage with ToServerMessage with FromServerMessage
 
 case class AppendEntries(
@@ -26,6 +31,7 @@ case class AppendEntries(
     leaderCommit: Option[LogIndex]
 ) extends ToServerMessage
     with FromServerMessage
+    with RequestMessage
 
 /** The extra [[followerId]], [[prevLog]] and [[entryCount]] are needed to correlate the response & request, so that the leader can update
   * [[LeaderState.nextIndex]] and [[LeaderState.matchIndex]] appropriately. Given an [[AppendEntries]] request message, a response can be
@@ -43,7 +49,7 @@ object AppendEntriesResponse:
   def to(followerId: NodeId, appendEntries: AppendEntries)(term: Term, success: Boolean): AppendEntriesResponse =
     AppendEntriesResponse(term, success, followerId, appendEntries.prevLog, appendEntries.entries.length)
 
-case class NewEntry(data: LogData) extends ToServerMessage
+case class NewEntry(data: LogData) extends ToServerMessage with RequestMessage
 case object NewEntryAddedResponse extends ResponseMessage with ToClientMessage
 
 /** Response sent in case a [[NewEntry]] is received by a non-leader node. */

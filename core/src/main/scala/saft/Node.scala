@@ -72,8 +72,8 @@ class Node(
           doRespond(RedirectToLeaderResponse(followerState.leaderId), respond) *> follower(state, followerState, timer)
 
         // ignore
-        case RequestReceived(_: RequestVoteResponse, _)   => follower(state, followerState, timer)
-        case RequestReceived(_: AppendEntriesResponse, _) => follower(state, followerState, timer)
+        case ResponseReceived(_: RequestVoteResponse)   => follower(state, followerState, timer)
+        case ResponseReceived(_: AppendEntriesResponse) => follower(state, followerState, timer)
       }
     }
 
@@ -108,16 +108,16 @@ class Node(
       case RequestReceived(_: NewEntry, respond) =>
         doRespond(RedirectToLeaderResponse(None), respond) *> candidate(state, candidateState, timer)
 
-      case RequestReceived(RequestVoteResponse(_, voteGranted), _) if voteGranted =>
+      case ResponseReceived(RequestVoteResponse(_, voteGranted)) if voteGranted =>
         val candidateState2 = candidateState.increaseReceivedVotes
         // If votes received from majority of servers: become leader
         if candidateState2.receivedVotes >= conf.majority
         then startLeader(state, timer)
         else candidate(state, candidateState2, timer)
-      case RequestReceived(_: RequestVoteResponse, _) => candidate(state, candidateState, timer)
+      case ResponseReceived(_: RequestVoteResponse) => candidate(state, candidateState, timer)
 
       // ignore
-      case RequestReceived(_: AppendEntriesResponse, _) => candidate(state, candidateState, timer)
+      case ResponseReceived(_: AppendEntriesResponse) => candidate(state, candidateState, timer)
     }
 
   private def startLeader(state: ServerState, timer: Timer): UIO[Nothing] = setLogAnnotation(StateLogAnnotation, "leader-start") *> {
@@ -148,7 +148,7 @@ class Node(
         persistence(state, state2) *> sendAppendEntries(state2, leaderState2, timer).flatMap(leader(state2, leaderState2, _))
 
       // If successful: update nextIndex and matchIndex for follower (§5.3)
-      case RequestReceived(AppendEntriesResponse(_, true, followerId, prevLog, entryCount), _) =>
+      case ResponseReceived(AppendEntriesResponse(_, true, followerId, prevLog, entryCount)) =>
         val leaderState2 = leaderState.appendSuccessful(followerId, prevLog, entryCount)
         // If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
         val newCommitIndex =
@@ -167,14 +167,14 @@ class Node(
         else leader(state, leaderState2, timer)
 
       // If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
-      case RequestReceived(AppendEntriesResponse(_, false, followerId, prevLog, _), _) =>
+      case ResponseReceived(AppendEntriesResponse(_, false, followerId, prevLog, _)) =>
         val leaderState2 = leaderState.appendFailed(followerId, prevLog)
         sendAppendEntry(followerId, state, leaderState2) *> leader(state, leaderState2, timer)
 
       // ignore
-      case RequestReceived(_: RequestVote, _)         => leader(state, leaderState, timer)
-      case RequestReceived(_: RequestVoteResponse, _) => leader(state, leaderState, timer)
-      case RequestReceived(_: AppendEntries, _)       => leader(state, leaderState, timer)
+      case RequestReceived(_: RequestVote, _)       => leader(state, leaderState, timer)
+      case ResponseReceived(_: RequestVoteResponse) => leader(state, leaderState, timer)
+      case RequestReceived(_: AppendEntries, _)     => leader(state, leaderState, timer)
     }
 
   private def sendAppendEntries(state: ServerState, leaderState: LeaderState, timer: Timer): UIO[Timer] =
@@ -206,7 +206,8 @@ class Node(
       case e => next(e)
     }
 
-  private def doSend(to: NodeId, msg: ToServerMessage): UIO[Unit] = ZIO.logDebug(s"Send to node${to.number}: $msg") *> comms.send(to, msg)
+  private def doSend(to: NodeId, msg: RequestMessage with ToServerMessage): UIO[Unit] =
+    ZIO.logDebug(s"Send to node${to.number}: $msg") *> comms.send(to, msg)
   private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.logDebug(s"Response: $msg") *> respond(msg)
 
 /** @param currentTimer
