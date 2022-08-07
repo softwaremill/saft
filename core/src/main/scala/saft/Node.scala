@@ -9,18 +9,15 @@ class Node(
     nodeId: NodeId,
     comms: Comms,
     stateMachine: StateMachine,
-    nodes: Set[NodeId],
-    electionTimeout: UIO[Timeout.type],
-    heartbeatTimeout: UIO[Timeout.type],
+    conf: Conf,
     persistence: Persistence
 ):
-  private val otherNodes = nodes - nodeId
-  private val majority = math.ceil(nodes.size.toDouble / 2).toInt
+  private val otherNodes = conf.nodeIds.toSet - nodeId
 
   def start: UIO[Nothing] =
     setNodeLogAnnotation(nodeId) *>
       ZIO.log("Node started") *>
-      Timer(electionTimeout, heartbeatTimeout, comms)
+      Timer(conf, comms)
         .flatMap(_.restartElection)
         .flatMap(timer => persistence.get.flatMap(state => follower(state, FollowerState(None), timer)))
         .onExit(_ => ZIO.log("Node stopped"))
@@ -114,7 +111,7 @@ class Node(
       case RequestReceived(RequestVoteResponse(_, voteGranted), _) if voteGranted =>
         val candidateState2 = candidateState.increaseReceivedVotes
         // If votes received from majority of servers: become leader
-        if candidateState2.receivedVotes >= majority
+        if candidateState2.receivedVotes >= conf.majority
         then startLeader(state, timer)
         else candidate(state, candidateState2, timer)
       case RequestReceived(_: RequestVoteResponse, _) => candidate(state, candidateState, timer)
@@ -154,7 +151,8 @@ class Node(
       case RequestReceived(AppendEntriesResponse(_, true, followerId, prevLog, entryCount), _) =>
         val leaderState2 = leaderState.appendSuccessful(followerId, prevLog, entryCount)
         // If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
-        val newCommitIndex = leaderState2.commitIndex(if state.log.isEmpty then None else Some(LogIndex(state.log.length - 1)), majority)
+        val newCommitIndex =
+          leaderState2.commitIndex(if state.log.isEmpty then None else Some(LogIndex(state.log.length - 1)), conf.majority)
         if newCommitIndex.exists(_ > state.commitIndex.getOrElse(-1)) && state.log.lastOption.map(_.term).contains(state.currentTerm)
         then
           val state2 = state.commitIndex(newCommitIndex)
@@ -211,25 +209,16 @@ class Node(
   private def doSend(to: NodeId, msg: ToServerMessage): UIO[Unit] = ZIO.logDebug(s"Send to node${to.number}: $msg") *> comms.send(to, msg)
   private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.logDebug(s"Response: $msg") *> respond(msg)
 
-/** @param electionTimeout
-  *   The timeout for an election - used when starting an election timer using [[restartElection]].
-  * @param heartbeatTimeout
-  *   The timeout for a leader heartbeat (sending [[AppendEntries]]) - used when starting a heartbeat timer using [[restartHeartbeat]].
-  * @param currentTimer
+/** @param currentTimer
   *   The currently running timer - a fiber, which eventually puts a [[Timeout]] message to [[queue]]. Can be interrupted to cancel the
   *   timer.
   */
-private class Timer(
-    electionTimeout: UIO[Timeout.type],
-    heartbeatTimeout: UIO[Timeout.type],
-    comms: Comms,
-    currentTimer: Fiber.Runtime[Nothing, Unit]
-):
+private class Timer(conf: Conf, comms: Comms, currentTimer: Fiber.Runtime[Nothing, Unit]):
   private def restart(timeout: UIO[Timeout.type]): UIO[Timer] =
-    currentTimer.interrupt *> timeout.flatMap(comms.add).fork.map(new Timer(electionTimeout, heartbeatTimeout, comms, _))
-  def restartElection: UIO[Timer] = restart(electionTimeout)
-  def restartHeartbeat: UIO[Timer] = restart(heartbeatTimeout)
+    currentTimer.interrupt *> timeout.flatMap(comms.add).fork.map(new Timer(conf, comms, _))
+  def restartElection: UIO[Timer] = restart(conf.electionTimeout)
+  def restartHeartbeat: UIO[Timer] = restart(conf.heartbeatTimeout)
 
 private object Timer:
-  def apply(electionTimeout: UIO[Timeout.type], heartbeatTimeout: UIO[Timeout.type], comms: Comms): UIO[Timer] =
-    ZIO.never.fork.map(new Timer(electionTimeout, heartbeatTimeout, comms, _))
+  def apply(conf: Conf, comms: Comms): UIO[Timer] =
+    ZIO.never.fork.map(new Timer(conf, comms, _))

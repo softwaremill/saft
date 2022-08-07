@@ -29,20 +29,10 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
 
   override val run: Task[Nothing] =
     // configuration
-    val numberOfNodes = 3
-    val electionTimeoutDuration = Duration.fromMillis(2000)
-    val heartbeatTimeoutDuration = Duration.fromMillis(500)
-    val electionRandomization = 500
+    val conf = Conf.default(3)
     val applyLogData = (nodeId: NodeId) => (data: LogData) => setNodeLogAnnotation(nodeId) *> ZIO.log(s"Apply: $data")
 
-    // setup nodes
-    val nodeIds = (1 to numberOfNodes).map(NodeId.apply)
-    val electionTimeout = ZIO.random
-      .flatMap(_.nextIntBounded(electionRandomization))
-      .flatMap(randomization => ZIO.sleep(electionTimeoutDuration.plusMillis(randomization)))
-      .as(Timeout)
-    val heartbeatTimeout = ZIO.sleep(heartbeatTimeoutDuration).as(Timeout)
-
+    // setup node
     val nodeId = NodeId(nodeNumber)
     val clientEnv = ChannelFactory.auto ++ EventLoopGroup.auto()
 
@@ -71,9 +61,10 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
             .catchAll { case e: Exception => ZIO.logErrorCause(s"Cannot send $msg to $toNodeId", Cause.fail(e)) }
         override def add(event: ServerEvent): UIO[Unit] = queue.offer(event).unit
       }
-      node = new Node(nodeId, comms, stateMachine, nodeIds.toSet, electionTimeout, heartbeatTimeout, persistence)
+      node = new Node(nodeId, comms, stateMachine, conf, persistence)
       port = nodePort(nodeId)
       _ <- ZIO.log(s"Starting SaftHttp on localhost:$port")
+      _ <- ZIO.log(s"Configuration: ${conf.show}")
       _ <- node.start.fork
       result <- Server.start(port, app(queue))
     } yield result

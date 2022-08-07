@@ -8,39 +8,20 @@ import java.io.IOException
 object SaftSim extends ZIOAppDefault with Logging {
   override def run: Task[Unit] = {
     // configuration
-    val numberOfNodes = 5
-    val electionTimeoutDuration = Duration.fromMillis(2000)
-    val heartbeatTimeoutDuration = Duration.fromMillis(500)
-    val electionRandomization = 500
+    val conf = Conf.default(5)
     val applyLogData = (nodeId: NodeId) => (data: LogData) => setNodeLogAnnotation(nodeId) *> ZIO.log(s"Apply: $data")
 
     // setup nodes
-    val nodeIds = (1 to numberOfNodes).map(NodeId.apply)
-    val electionTimeout = ZIO.random
-      .flatMap(_.nextIntBounded(electionRandomization))
-      .flatMap(randomization => ZIO.sleep(electionTimeoutDuration.plusMillis(randomization)))
-      .as(Timeout)
-    val heartbeatTimeout = ZIO.sleep(heartbeatTimeoutDuration).as(Timeout)
-
     for {
-      comms <- InMemoryComms(nodeIds)
-      stateMachines <- ZIO.foreach(nodeIds)(nodeId => StateMachine.background(applyLogData(nodeId)).map(nodeId -> _)).map(_.toMap)
-      persistence <- InMemoryPersistence(nodeIds)
-      nodes = nodeIds.toList
-        .map(nodeId =>
-          nodeId -> new Node(
-            nodeId,
-            comms(nodeId),
-            stateMachines(nodeId),
-            nodeIds.toSet,
-            electionTimeout,
-            heartbeatTimeout,
-            persistence.forNodeId(nodeId)
-          )
-        )
+      comms <- InMemoryComms(conf.nodeIds)
+      stateMachines <- ZIO.foreach(conf.nodeIds)(nodeId => StateMachine.background(applyLogData(nodeId)).map(nodeId -> _)).map(_.toMap)
+      persistence <- InMemoryPersistence(conf.nodeIds)
+      nodes = conf.nodeIds.toList
+        .map(nodeId => nodeId -> new Node(nodeId, comms(nodeId), stateMachines(nodeId), conf, persistence.forNodeId(nodeId)))
         .toMap
       _ <- ZIO.log("Welcome to SaftSim - Scala Raft simulation. Available commands:")
       _ <- ZIO.log("E - exit; Nn data - send new entry <data> to node <n>; Kn - kill node n; Sn - start node n")
+      _ <- ZIO.log(s"Configuration: ${conf.show}")
       // run interactive loop
       _ <- handleCommands(nodes, comms)
     } yield ()
