@@ -11,9 +11,13 @@ object SaftHttp3 extends SaftHttp(3)
 
 /** A Raft implementation using json-over-http for inter-node communication. */
 class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Logging {
+  private class TimedOutException extends Exception
+  private class DecodeException(msg: String) extends Exception
+
   override val run: Task[Nothing] =
     // configuration
     val conf = Conf.default(3)
+    val clientTimeout = Duration.fromSeconds(5)
     val applyLogData = (nodeId: NodeId) => (data: LogData) => setNodeLogAnnotation(nodeId) *> ZIO.log(s"Apply: $data")
 
     // setup node
@@ -34,11 +38,11 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
               content = HttpData.fromString(encodeRequest(msg))
             )
             .provide(clientEnv)
-            .timeoutFail(new RuntimeException("Timed out"))(Duration.fromSeconds(5))
+            .timeoutFail(new TimedOutException)(clientTimeout)
             .flatMap(_.bodyAsString)
             .flatMap { body =>
               decodeResponse(msg, body) match
-                case Left(value)    => ???
+                case Left(errorMsg) => ZIO.fail(new DecodeException(errorMsg))
                 case Right(decoded) => queue.offer(ResponseReceived(decoded))
             }
             .unit
@@ -55,6 +59,22 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
 
   private def nodePort(nodeId: NodeId): Int = 8080 + nodeId.number
 
+  val AppendEntriesEndpoint = "append-entries"
+  val RequestVoteEndpoint = "request-vote"
+  val NewEntryEndpoint = "new-entry"
+
+  private def app(queue: Queue[ServerEvent]): HttpApp[Any, Throwable] = Http
+    .collectZIO[Request] {
+      case r @ Method.POST -> !! / AppendEntriesEndpoint => decodingEndpoint(r, _.fromJson[AppendEntries], queue)
+      case r @ Method.POST -> !! / RequestVoteEndpoint   => decodingEndpoint(r, _.fromJson[RequestVote], queue)
+      case r @ Method.POST -> !! / NewEntryEndpoint      => decodingEndpoint(r, _.fromJson[NewEntry], queue)
+    }
+    .catchAll {
+      case e: TimedOutException => Http.fromZIO(ZIO.logDebugCause(Cause.fail(e)).as(Response(Status.RequestTimeout)))
+      case e: DecodeException   => Http.fromZIO(ZIO.logDebugCause(Cause.fail(e)).as(Response(Status.BadRequest)))
+      case e: Exception         => Http.fromZIO(ZIO.logErrorCause(Cause.fail(e)).as(Response(Status.InternalServerError)))
+    }
+
   private def decodingEndpoint[T <: RequestMessage with ToServerMessage](
       request: Request,
       decode: String => Either[String, T],
@@ -65,20 +85,10 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
         for {
           p <- Promise.make[Nothing, ResponseMessage]
           _ <- queue.offer(RequestReceived(msg, r => p.succeed(r).unit))
-          r <- p.await.timeoutFail(new RuntimeException("Timed out"))(Duration.fromSeconds(5))
+          r <- p.await.timeoutFail(new TimedOutException)(Duration.fromSeconds(5))
         } yield Response.text(encodeResponse(r))
-      case Left(error) => ZIO.succeed(Response.text(error).setStatus(Status.BadRequest))
+      case Left(errorMsg) => ZIO.fail(new DecodeException(errorMsg))
     }
-
-  val AppendEntriesEndpoint = "append-entries"
-  val RequestVoteEndpoint = "request-vote"
-  val NewEntryEndpoint = "new-entry"
-
-  private def app(queue: Queue[ServerEvent]): HttpApp[Any, Throwable] = Http.collectZIO[Request] {
-    case r @ Method.POST -> !! / AppendEntriesEndpoint => decodingEndpoint(r, _.fromJson[AppendEntries], queue)
-    case r @ Method.POST -> !! / RequestVoteEndpoint   => decodingEndpoint(r, _.fromJson[RequestVote], queue)
-    case r @ Method.POST -> !! / NewEntryEndpoint      => decodingEndpoint(r, _.fromJson[NewEntry], queue)
-  }
 
   private def endpoint(msg: RequestMessage): String = msg match
     case _: AppendEntries => AppendEntriesEndpoint
