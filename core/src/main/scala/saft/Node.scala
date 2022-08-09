@@ -23,10 +23,10 @@ class Node(
         .onExit(_ => ZIO.log("Node stopped"))
 
   private def follower(state: ServerState, followerState: FollowerState, timer: Timer): UIO[Nothing] =
-    setLogAnnotation(StateLogAnnotation, "follower") *> nextEvent(state, timer)(handleFollower(_, state, followerState, timer))
+    setStateLogAnnotation("follower") *> nextEvent(state, timer)(handleFollower(_, state, followerState, timer))
 
   private def handleFollower(event: ServerEvent, state: ServerState, followerState: FollowerState, timer: Timer): UIO[Nothing] =
-    setLogAnnotation(StateLogAnnotation, "follower") *> {
+    setStateLogAnnotation("follower") *> {
       event match {
         // If election timeout elapses without receiving AppendEntries RPC from current leader or granting vote to candidate: convert to candidate
         case Timeout => startCandidate(state, timer)
@@ -77,7 +77,7 @@ class Node(
       }
     }
 
-  private def startCandidate(state: ServerState, timer: Timer): UIO[Nothing] = setLogAnnotation(StateLogAnnotation, "candidate-start") *> {
+  private def startCandidate(state: ServerState, timer: Timer): UIO[Nothing] = setStateLogAnnotation("candidate-start") *> {
     // On conversion to candidate, start election: Increment currentTerm, Vote for self
     val state2 = state.incrementTerm(nodeId)
     // Reset election timer
@@ -90,7 +90,7 @@ class Node(
   }
 
   private def candidate(state: ServerState, candidateState: CandidateState, timer: Timer): UIO[Nothing] =
-    setLogAnnotation(StateLogAnnotation, "candidate") *> nextEvent(state, timer) {
+    setStateLogAnnotation("candidate") *> nextEvent(state, timer) {
       // If election timeout elapses: start new election
       case Timeout => startCandidate(state, timer)
 
@@ -120,7 +120,7 @@ class Node(
       case ResponseReceived(_: AppendEntriesResponse) => candidate(state, candidateState, timer)
     }
 
-  private def startLeader(state: ServerState, timer: Timer): UIO[Nothing] = setLogAnnotation(StateLogAnnotation, "leader-start") *> {
+  private def startLeader(state: ServerState, timer: Timer): UIO[Nothing] = setStateLogAnnotation("leader-start") *> {
     val leaderState = LeaderState(
       // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
       otherNodes.map(_ -> state.lastEntryTerm.map(_.index).fold(LogIndex(0))(i => LogIndex(i + 1))).toMap,
@@ -136,7 +136,7 @@ class Node(
   }
 
   private def leader(state: ServerState, leaderState: LeaderState, timer: Timer): UIO[Nothing] =
-    setLogAnnotation(StateLogAnnotation, "leader") *> nextEvent(state, timer) {
+    setStateLogAnnotation("leader") *> nextEvent(state, timer) {
       // repeat during idle periods to prevent election timeouts (§5.2)
       case Timeout =>
         sendAppendEntries(state, leaderState, timer).flatMap(timer2 => leader(state, leaderState, timer2))
