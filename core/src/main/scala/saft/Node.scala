@@ -84,7 +84,7 @@ class Node(
     ZIO.log(s"Became candidate (term: ${state2.currentTerm})") *> timer.restartElection.flatMap(timer2 =>
       persistence(state, state2) *>
         // Send RequestVote RPCs to all other servers
-        ZIO.foreachPar(otherNodes)(otherNodeId => doSend(otherNodeId, RequestVote(state2.currentTerm, nodeId, state2.lastEntryTerm))) *>
+        ZIO.foreachDiscard(otherNodes)(otherNodeId => doSend(otherNodeId, RequestVote(state2.currentTerm, nodeId, state2.lastEntryTerm))) *>
         candidate(state2, CandidateState(1), timer2)
     )
   }
@@ -172,9 +172,11 @@ class Node(
         sendAppendEntry(followerId, state, leaderState2) *> leader(state, leaderState2, timer)
 
       // ignore
-      case RequestReceived(_: RequestVote, _)       => leader(state, leaderState, timer)
+      case RequestReceived(_: RequestVote, respond) =>
+        doRespond(RequestVoteResponse(state.currentTerm, voteGranted = false), respond) *> leader(state, leaderState, timer)
       case ResponseReceived(_: RequestVoteResponse) => leader(state, leaderState, timer)
-      case RequestReceived(_: AppendEntries, _)     => leader(state, leaderState, timer)
+      case RequestReceived(ae: AppendEntries, respond) =>
+        doRespond(AppendEntriesResponse.to(nodeId, ae)(state.currentTerm, success = false), respond) *> leader(state, leaderState, timer)
     }
 
   private def sendAppendEntries(state: ServerState, leaderState: LeaderState, timer: Timer): UIO[Timer] =
@@ -189,7 +191,7 @@ class Node(
         val prev = LogIndex(nextIndex - 1)
         Some(LogIndexTerm(state.log(prev).term, prev))
 
-    doSend(otherNodeId, AppendEntries(state.currentTerm, nodeId, prevEntry, state.log.drop(nextIndex), state.commitIndex))
+    doSend(otherNodeId, AppendEntries(state.currentTerm, nodeId, prevEntry, state.log.drop(nextIndex), state.commitIndex)).unit
 
   private def applyEntries(state: ServerState): UIO[ServerState] =
     ZIO.foreach(state.indexesToApply)(i => stateMachine(state.log(i).data)).as {
@@ -198,16 +200,18 @@ class Node(
     }
 
   private def nextEvent(state: ServerState, timer: Timer)(next: ServerEvent => UIO[Nothing]): UIO[Nothing] =
-    comms.nextEvent.flatMap {
-      // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
-      case e @ RequestReceived(msg: FromServerMessage, _) if msg.term > state.currentTerm =>
-        val state2 = state.updateTerm(msg.term)
-        timer.restartElection.flatMap(timer2 => persistence(state, state2) *> handleFollower(e, state2, FollowerState(None), timer2))
-      case e => next(e)
-    }
+    comms.nextEvent
+      .tap(e => ZIO.logDebug(s"Next event: $e"))
+      .flatMap {
+        // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
+        case e @ RequestReceived(msg: FromServerMessage, _) if msg.term > state.currentTerm =>
+          val state2 = state.updateTerm(msg.term)
+          timer.restartElection.flatMap(timer2 => persistence(state, state2) *> handleFollower(e, state2, FollowerState(None), timer2))
+        case e => next(e)
+      }
 
-  private def doSend(to: NodeId, msg: RequestMessage with FromServerMessage): UIO[Unit] =
-    ZIO.logDebug(s"Send to node${to.number}: $msg") *> comms.send(to, msg)
+  private def doSend(to: NodeId, msg: RequestMessage with FromServerMessage): UIO[Fiber.Runtime[Nothing, Unit]] =
+    ZIO.logDebug(s"Send to node${to.number}: $msg") *> comms.send(to, msg).fork
   private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.logDebug(s"Response: $msg") *> respond(msg)
 
 /** @param currentTimer

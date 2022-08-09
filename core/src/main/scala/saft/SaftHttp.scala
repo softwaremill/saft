@@ -1,9 +1,10 @@
 package saft
 
+import sttp.client3.httpclient.zio.HttpClientZioBackend
 import zio.*
 import zio.json.*
 import zhttp.http.*
-import zhttp.service.{ChannelFactory, Client, EventLoopGroup, Server}
+import zhttp.service.Server
 
 object SaftHttp1 extends SaftHttp(1)
 object SaftHttp2 extends SaftHttp(2)
@@ -11,8 +12,8 @@ object SaftHttp3 extends SaftHttp(3)
 
 /** A Raft implementation using json-over-http for inter-node communication. */
 class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Logging {
-  private class TimedOutException extends Exception
-  private class DecodeException(msg: String) extends Exception
+  private case class TimedOutException(msg: String) extends Exception(msg)
+  private case class DecodeException(msg: String) extends Exception(msg)
 
   override val run: Task[Nothing] =
     // configuration
@@ -22,27 +23,24 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
 
     // setup node
     val nodeId = NodeId(nodeNumber)
-    val clientEnv = ChannelFactory.auto ++ EventLoopGroup.auto()
 
     for {
       stateMachine <- StateMachine.background(applyLogData(nodeId))
       persistence <- InMemoryPersistence(List(nodeId)).map(_.forNodeId(nodeId))
       queue <- Queue.sliding[ServerEvent](16)
+      backend <- HttpClientZioBackend()
       comms = new Comms {
         override def nextEvent: UIO[ServerEvent] = queue.take
         override def send(toNodeId: NodeId, msg: RequestMessage with FromServerMessage): UIO[Unit] =
-          Client
-            .request(
-              url = s"http://localhost:${nodePort(toNodeId)}/${endpoint(msg)}",
-              method = Method.POST,
-              content = HttpData.fromString(encodeRequest(msg))
-            )
-            .provide(clientEnv)
-            .timeoutFail(new TimedOutException)(clientTimeout)
-            .flatMap(_.bodyAsString)
+          import sttp.client3.*
+          val url = uri"http://localhost:${nodePort(toNodeId)}/${endpoint(msg)}"
+          backend
+            .send(basicRequest.post(url).body(encodeRequest(msg)).response(asStringAlways))
+            .timeoutFail(TimedOutException(s"Client request $msg to $url"))(clientTimeout)
+            .map(_.body)
             .flatMap { body =>
               decodeResponse(msg, body) match
-                case Left(errorMsg) => ZIO.fail(new DecodeException(errorMsg))
+                case Left(errorMsg) => ZIO.fail(DecodeException(s"Client request $msg to $url, response: $body, error: $errorMsg"))
                 case Right(decoded) => queue.offer(ResponseReceived(decoded))
             }
             .unit
@@ -70,8 +68,8 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
       case r @ Method.POST -> !! / NewEntryEndpoint      => decodingEndpoint(r, _.fromJson[NewEntry], queue)
     }
     .catchAll {
-      case e: TimedOutException => Http.fromZIO(ZIO.logDebugCause(Cause.fail(e)).as(Response(Status.RequestTimeout)))
-      case e: DecodeException   => Http.fromZIO(ZIO.logDebugCause(Cause.fail(e)).as(Response(Status.BadRequest)))
+      case e: TimedOutException => Http.fromZIO(ZIO.logErrorCause(Cause.fail(e)).as(Response(Status.RequestTimeout)))
+      case e: DecodeException   => Http.fromZIO(ZIO.logErrorCause(Cause.fail(e)).as(Response(Status.BadRequest)))
       case e: Exception         => Http.fromZIO(ZIO.logErrorCause(Cause.fail(e)).as(Response(Status.InternalServerError)))
     }
 
@@ -85,9 +83,9 @@ class SaftHttp(nodeNumber: Int) extends JsonCodecs with ZIOAppDefault with Loggi
         for {
           p <- Promise.make[Nothing, ResponseMessage]
           _ <- queue.offer(RequestReceived(msg, r => p.succeed(r).unit))
-          r <- p.await.timeoutFail(new TimedOutException)(Duration.fromSeconds(5))
+          r <- p.await.timeoutFail(TimedOutException(s"Handling request message: $msg"))(Duration.fromSeconds(1))
         } yield Response.text(encodeResponse(r))
-      case Left(errorMsg) => ZIO.fail(new DecodeException(errorMsg))
+      case Left(errorMsg) => ZIO.fail(DecodeException(s"Handling request message: $errorMsg"))
     }
 
   private def endpoint(msg: RequestMessage): String = msg match
