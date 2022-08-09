@@ -7,12 +7,15 @@ import zio.json.*
 import zhttp.http.*
 import zhttp.service.Server
 
-object SaftHttp1 extends SaftHttp(1)
-object SaftHttp2 extends SaftHttp(2)
-object SaftHttp3 extends SaftHttp(3)
+import java.io.File
+import java.nio.file.{Files, Path => JPath}
+
+object SaftHttp1 extends SaftHttp(1, JPath.of("saft1.json"))
+object SaftHttp2 extends SaftHttp(2, JPath.of("saft2.json"))
+object SaftHttp3 extends SaftHttp(3, JPath.of("saft3.json"))
 
 /** A Raft implementation using json-over-http for inter-node communication. */
-class SaftHttp(nodeNumber: Int) extends ZIOAppDefault with JsonCodecs with Logging {
+class SaftHttp(nodeNumber: Int, persistencePath: JPath) extends ZIOAppDefault with JsonCodecs with Logging {
   override val run: Task[Nothing] =
     // configuration
     val conf = Conf.default(3)
@@ -26,7 +29,7 @@ class SaftHttp(nodeNumber: Int) extends ZIOAppDefault with JsonCodecs with Loggi
 
     for {
       stateMachine <- StateMachine.background(applyLogData(nodeId))
-      persistence <- InMemoryPersistence(List(nodeId)).map(_.forNodeId(nodeId))
+      persistence = new FileJsonPersistence(persistencePath)
       queue <- Queue.sliding[ServerEvent](16)
       backend <- HttpClientZioBackend()
       comms = new HttpComms(queue, backend, clientTimeout, nodePort)
@@ -139,8 +142,27 @@ private trait JsonCodecs {
       case _: AppendEntries => data.fromJson[AppendEntriesResponse]
 }
 
-object EndpointNames {
+private object EndpointNames {
   val AppendEntries = "append-entries"
   val RequestVote = "request-vote"
   val NewEntry = "new-entry"
+}
+
+private class FileJsonPersistence(path: JPath) extends Persistence with JsonCodecs {
+  private given JsonDecoder[ServerState] = DeriveJsonDecoder.gen[ServerState]
+  private given JsonEncoder[ServerState] = DeriveJsonEncoder.gen[ServerState]
+
+  override def apply(oldState: ServerState, newState: ServerState): UIO[Unit] =
+    ZIO
+      .attempt {
+        val json = newState.copy(commitIndex = None, lastApplied = None).toJsonPretty
+        Files.writeString(path, json)
+      }
+      .unit
+      .orDie
+
+  override def get: UIO[ServerState] =
+    if path.toFile.exists()
+    then ZIO.fromEither(Files.readString(path).fromJson[ServerState]).mapError(DecodeException.apply).orDie
+    else ZIO.succeed(ServerState.Initial)
 }
