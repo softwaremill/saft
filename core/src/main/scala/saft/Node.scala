@@ -215,8 +215,8 @@ class Node(
   private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.logDebug(s"Response: $msg") *> respond(msg)
 
 /** @param currentTimer
-  *   The currently running timer - a fiber, which eventually puts a [[Timeout]] message to [[queue]]. Can be interrupted to cancel the
-  *   timer.
+  *   The currently running timer - a fiber, which eventually adds a [[Timeout]] event using [[comms.add]]. That fiber can be interrupted to
+  *   cancel the timer.
   */
 private class Timer(conf: Conf, comms: Comms, currentTimer: Fiber.Runtime[Nothing, Unit]):
   private def restart(timeout: UIO[Timeout.type]): UIO[Timer] =
