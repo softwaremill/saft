@@ -33,7 +33,7 @@ class SaftHttp(nodeNumber: Int, persistencePath: JPath) extends ZIOAppDefault wi
       queue <- Queue.sliding[ServerEvent](16)
       backend <- HttpClientZioBackend()
       comms = new HttpComms(queue, backend, clientTimeout, nodePort)
-      node = new Node(nodeId, comms, stateMachine, conf, persistence)
+      node = new Node2(nodeId, comms, stateMachine, conf, persistence)
       _ <- ZIO.log(s"Starting SaftHttp on localhost:$port")
       _ <- ZIO.log(s"Configuration: ${conf.show}")
       _ <- node.start.fork
@@ -120,16 +120,16 @@ private trait JsonCodecs {
   given JsonEncoder[RequestVoteResponse] = DeriveJsonEncoder.gen[RequestVoteResponse]
   given JsonDecoder[NewEntry] = DeriveJsonDecoder.gen[NewEntry]
   given JsonEncoder[NewEntry] = DeriveJsonEncoder.gen[NewEntry]
-  given JsonDecoder[NewEntryAddedResponse.type] = DeriveJsonDecoder.gen[NewEntryAddedResponse.type]
-  given JsonEncoder[NewEntryAddedResponse.type] = DeriveJsonEncoder.gen[NewEntryAddedResponse.type]
+  given JsonDecoder[NewEntryAddedSuccessfullyResponse.type] = DeriveJsonDecoder.gen[NewEntryAddedSuccessfullyResponse.type]
+  given JsonEncoder[NewEntryAddedSuccessfullyResponse.type] = DeriveJsonEncoder.gen[NewEntryAddedSuccessfullyResponse.type]
   given JsonDecoder[RedirectToLeaderResponse] = DeriveJsonDecoder.gen[RedirectToLeaderResponse]
   given JsonEncoder[RedirectToLeaderResponse] = DeriveJsonEncoder.gen[RedirectToLeaderResponse]
 
   def encodeResponse(r: ResponseMessage): String = r match
-    case r: RequestVoteResponse        => r.toJson
-    case r: AppendEntriesResponse      => r.toJson
-    case r: NewEntryAddedResponse.type => r.toJson
-    case r: RedirectToLeaderResponse   => r.toJson
+    case r: RequestVoteResponse                    => r.toJson
+    case r: AppendEntriesResponse                  => r.toJson
+    case r: NewEntryAddedSuccessfullyResponse.type => r.toJson
+    case r: RedirectToLeaderResponse               => r.toJson
 
   def encodeRequest(m: RequestMessage): String = m match
     case r: RequestVote   => r.toJson

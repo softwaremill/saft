@@ -47,7 +47,11 @@ object AppendEntriesResponse:
     AppendEntriesResponse(term, success, followerId, appendEntries.prevLog, appendEntries.entries.length)
 
 case class NewEntry(data: LogData) extends RequestMessage
-case object NewEntryAddedResponse extends ToClientMessage
+
+sealed trait NewEntryAddedResponse extends ToClientMessage
+
+/** Response sent when a new entry is successfully replicated and committed. */
+case object NewEntryAddedSuccessfullyResponse extends NewEntryAddedResponse
 
 /** Response sent in case a [[NewEntry]] is received by a non-leader node. */
-case class RedirectToLeaderResponse(leaderId: Option[NodeId]) extends ToClientMessage
+case class RedirectToLeaderResponse(leaderId: Option[NodeId]) extends NewEntryAddedResponse

@@ -144,7 +144,8 @@ class Node(
       // If command received from client: append entry to local log
       case RequestReceived(NewEntry(value), respond) =>
         val state2 = state.appendEntry(LogEntry(value, state.currentTerm))
-        val leaderState2 = leaderState.addAwaitingResponse(LogIndex(state.log.length - 1), doRespond(NewEntryAddedResponse, respond))
+        val leaderState2 =
+          leaderState.addAwaitingResponse(LogIndex(state.log.length - 1), doRespond(NewEntryAddedSuccessfullyResponse, respond))
         persistence(state, state2) *> sendAppendEntries(state2, leaderState2, timer).flatMap(leader(state2, leaderState2, _))
 
       // If successful: update nextIndex and matchIndex for follower (§5.3)
@@ -218,12 +219,12 @@ class Node(
   *   The currently running timer - a fiber, which eventually adds a [[Timeout]] event using [[comms.add]]. That fiber can be interrupted to
   *   cancel the timer.
   */
-private class Timer(conf: Conf, comms: Comms, currentTimer: Fiber.Runtime[Nothing, Unit]):
+class Timer(conf: Conf, comms: Comms, currentTimer: Fiber.Runtime[Nothing, Unit]):
   private def restart(timeout: UIO[Timeout.type]): UIO[Timer] =
     currentTimer.interrupt *> timeout.flatMap(comms.add).fork.map(new Timer(conf, comms, _))
   def restartElection: UIO[Timer] = restart(conf.electionTimeout)
   def restartHeartbeat: UIO[Timer] = restart(conf.heartbeatTimeout)
 
-private object Timer:
+object Timer:
   def apply(conf: Conf, comms: Comms): UIO[Timer] =
     ZIO.never.fork.map(new Timer(conf, comms, _))
