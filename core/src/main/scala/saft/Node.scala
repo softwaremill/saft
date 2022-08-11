@@ -4,13 +4,13 @@ import zio.{Exit, Fiber, Promise, UIO, ZIO}
 
 import scala.annotation.tailrec
 
-// TODO enum
-private sealed trait NodeRole:
+private enum NodeRole:
   def state: ServerState
   def timer: Timer
-private case class Follower(state: ServerState, followerState: FollowerState, timer: Timer) extends NodeRole
-private case class Candidate(state: ServerState, candidateState: CandidateState, timer: Timer) extends NodeRole
-private case class Leader(state: ServerState, leaderState: LeaderState, timer: Timer) extends NodeRole
+
+  case Follower(state: ServerState, followerState: FollowerState, timer: Timer) extends NodeRole
+  case Candidate(state: ServerState, candidateState: CandidateState, timer: Timer) extends NodeRole
+  case Leader(state: ServerState, leaderState: LeaderState, timer: Timer) extends NodeRole
 
 /** A Raft node. Communicates with the outside world using [[comms]]. Committed logs are applied to [[stateMachine]]. */
 class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf, persistence: Persistence) {
@@ -22,7 +22,7 @@ class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf
     initialTimer <- Timer(conf, comms)
     timer <- initialTimer.restartElection
     initialState <- persistence.get
-    role = Follower(initialState, FollowerState(None), timer)
+    role = NodeRole.Follower(initialState, FollowerState(None), timer)
     result <- run(role)
   } yield result).onExit(_ => ZIO.log("Node stopped"))
 
@@ -30,9 +30,9 @@ class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf
     comms.nextEvent
       .tap(_ =>
         role match
-          case _: Follower  => setStateLogAnnotation("follower")
-          case _: Candidate => setStateLogAnnotation("candidate")
-          case _: Leader    => setStateLogAnnotation("leader")
+          case _: NodeRole.Follower  => setStateLogAnnotation("follower")
+          case _: NodeRole.Candidate => setStateLogAnnotation("candidate")
+          case _: NodeRole.Leader    => setStateLogAnnotation("leader")
       )
       .tap(e => ZIO.logDebug(s"Next event: $e"))
       .flatMap {
@@ -43,7 +43,7 @@ class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf
           for {
             newTimer <- role.timer.restartElection
             _ <- persistence(state, newState)
-            newRole <- handleEvent(e, Follower(newState, FollowerState(None), newTimer))
+            newRole <- handleEvent(e, NodeRole.Follower(newState, FollowerState(None), newTimer))
           } yield newRole
         case e => handleEvent(e, role)
       }
@@ -65,12 +65,12 @@ class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf
   private def timeout(role: NodeRole): UIO[NodeRole] =
     role match
       // If election timeout elapses without receiving AppendEntries RPC from current leader or granting vote to candidate: convert to candidate
-      case Follower(state, _, timer) => startCandidate(state, timer)
+      case NodeRole.Follower(state, _, timer) => startCandidate(state, timer)
       // If election timeout elapses: start new election
-      case Candidate(state, _, timer) => startCandidate(state, timer)
+      case NodeRole.Candidate(state, _, timer) => startCandidate(state, timer)
       // repeat during idle periods to prevent election timeouts (§5.2)
-      case Leader(state, leaderState, timer) =>
-        sendAppendEntries(state, leaderState, timer).map(newTimer => Leader(state, leaderState, newTimer))
+      case NodeRole.Leader(state, leaderState, timer) =>
+        sendAppendEntries(state, leaderState, timer).map(newTimer => NodeRole.Leader(state, leaderState, newTimer))
 
   private def startCandidate(state: ServerState, timer: Timer): UIO[NodeRole] =
     // On conversion to candidate, start election: Increment currentTerm, Vote for self
@@ -83,10 +83,10 @@ class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf
       _ <- ZIO.foreachDiscard(otherNodes)(otherNodeId =>
         doSend(otherNodeId, RequestVote(newState.currentTerm, nodeId, newState.lastEntryTerm))
       )
-    } yield Candidate(newState, CandidateState(1), newTimer)
+    } yield NodeRole.Candidate(newState, CandidateState(1), newTimer)
 
   private def requestVote(rv: RequestVote, role: NodeRole): UIO[(RequestVoteResponse, NodeRole)] = role match
-    case follower @ Follower(state, followerState, timer) =>
+    case follower @ NodeRole.Follower(state, followerState, timer) =>
       // Reply false if term < currentTerm
       // If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
       if ((rv.term < state.currentTerm) || state.votedForOtherThan(rv.candidateId) || state.hasEntriesAfter(rv.lastLog)) {
@@ -94,22 +94,22 @@ class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf
       } else {
         val newState = state.voteFor(rv.candidateId)
         timer.restartElection.map(newTimer =>
-          (RequestVoteResponse(newState.currentTerm, voteGranted = true), Follower(newState, followerState, newTimer))
+          (RequestVoteResponse(newState.currentTerm, voteGranted = true), NodeRole.Follower(newState, followerState, newTimer))
         )
       }
-    case candidate: Candidate => ZIO.succeed((RequestVoteResponse(candidate.state.currentTerm, voteGranted = false), candidate))
-    case leader: Leader       => ZIO.succeed((RequestVoteResponse(leader.state.currentTerm, voteGranted = false), leader))
+    case candidate: NodeRole.Candidate => ZIO.succeed((RequestVoteResponse(candidate.state.currentTerm, voteGranted = false), candidate))
+    case leader: NodeRole.Leader       => ZIO.succeed((RequestVoteResponse(leader.state.currentTerm, voteGranted = false), leader))
 
   @tailrec
   private def appendEntries(ae: AppendEntries, role: NodeRole): UIO[(AppendEntriesResponse, NodeRole)] = role match
-    case Follower(state, followerState, timer) =>
+    case NodeRole.Follower(state, followerState, timer) =>
       val newFollowerState = followerState.leaderId(ae.leaderId)
 
       // Reply false if term < currentTerm (§5.1)
       // Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
       if (ae.term < state.currentTerm || !state.hasEntryAtTerm(ae.prevLog)) {
         val response = AppendEntriesResponse.to(nodeId, ae)(state.currentTerm, success = false)
-        timer.restartElection.map(newTimer => (response, Follower(state, newFollowerState, newTimer)))
+        timer.restartElection.map(newTimer => (response, NodeRole.Follower(state, newFollowerState, newTimer)))
       } else {
         // If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
         // Append any new entries not already in the log
@@ -120,16 +120,16 @@ class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf
         for {
           newTimer <- timer.restartElection
           newState2 <- applyEntries(newState)
-        } yield (response, Follower(newState2, newFollowerState, newTimer))
+        } yield (response, NodeRole.Follower(newState2, newFollowerState, newTimer))
       }
 
-    case candidate @ Candidate(state, _, timer) =>
+    case candidate @ NodeRole.Candidate(state, _, timer) =>
       // If AppendEntries RPC received from new leader: convert to follower
       if state.currentTerm == ae.term
-      then appendEntries(ae, Follower(state, FollowerState(Some(ae.leaderId)), timer))
+      then appendEntries(ae, NodeRole.Follower(state, FollowerState(Some(ae.leaderId)), timer))
       else ZIO.succeed((AppendEntriesResponse.to(nodeId, ae)(state.currentTerm, success = false), candidate))
 
-    case leader: Leader => ZIO.succeed((AppendEntriesResponse.to(nodeId, ae)(leader.state.currentTerm, success = false), leader))
+    case leader: NodeRole.Leader => ZIO.succeed((AppendEntriesResponse.to(nodeId, ae)(leader.state.currentTerm, success = false), leader))
 
   private def newEntry(ne: NewEntry, role: NodeRole): UIO[(Promise[Nothing, NewEntryAddedResponse], NodeRole)] =
     def redirectToLeader(leaderId: Option[NodeId]) = for {
@@ -138,10 +138,10 @@ class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf
     } yield (p, role)
 
     role match
-      case Follower(_, FollowerState(leaderId), _) => redirectToLeader(leaderId)
-      case _: Candidate                            => redirectToLeader(None)
+      case NodeRole.Follower(_, FollowerState(leaderId), _) => redirectToLeader(leaderId)
+      case _: NodeRole.Candidate                            => redirectToLeader(None)
       // If command received from client: append entry to local log
-      case Leader(state, leaderState, timer) =>
+      case NodeRole.Leader(state, leaderState, timer) =>
         for {
           p <- Promise.make[Nothing, NewEntryAddedResponse]
           newState = state.appendEntry(LogEntry(ne.data, state.currentTerm))
@@ -150,18 +150,18 @@ class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf
             p.succeed(NewEntryAddedSuccessfullyResponse).unit
           )
           newTimer <- sendAppendEntries(newState, newLeaderState, timer)
-        } yield (p, Leader(newState, newLeaderState, newTimer))
+        } yield (p, NodeRole.Leader(newState, newLeaderState, newTimer))
 
   private def requestVoteResponse(rvr: RequestVoteResponse, role: NodeRole): UIO[NodeRole] = role match
-    case follower: Follower => ZIO.succeed(follower) // ignore
-    case Candidate(state, candidateState, timer) if rvr.voteGranted =>
+    case follower: NodeRole.Follower => ZIO.succeed(follower) // ignore
+    case NodeRole.Candidate(state, candidateState, timer) if rvr.voteGranted =>
       val newCandidateState = candidateState.increaseReceivedVotes
       // If votes received from majority of servers: become leader
       if newCandidateState.receivedVotes >= conf.majority
       then startLeader(state, timer)
-      else ZIO.succeed(Candidate(state, newCandidateState, timer))
-    case candidate: Candidate => ZIO.succeed(candidate)
-    case leader: Leader       => ZIO.succeed(leader)
+      else ZIO.succeed(NodeRole.Candidate(state, newCandidateState, timer))
+    case candidate: NodeRole.Candidate => ZIO.succeed(candidate)
+    case leader: NodeRole.Leader       => ZIO.succeed(leader)
 
   private def startLeader(state: ServerState, timer: Timer): UIO[NodeRole] = {
     val leaderState = LeaderState(
@@ -176,14 +176,14 @@ class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf
     for {
       _ <- ZIO.log(s"Became leader (term: ${state.currentTerm})")
       newTimer <- sendAppendEntries(state, leaderState, timer)
-    } yield Leader(state, leaderState, newTimer)
+    } yield NodeRole.Leader(state, leaderState, newTimer)
   }
 
   def appendEntriesResponse(aer: AppendEntriesResponse, role: NodeRole): UIO[NodeRole] = role match
-    case follower: Follower   => ZIO.succeed(follower)
-    case candidate: Candidate => ZIO.succeed(candidate)
+    case follower: NodeRole.Follower   => ZIO.succeed(follower)
+    case candidate: NodeRole.Candidate => ZIO.succeed(candidate)
     // If successful: update nextIndex and matchIndex for follower (§5.3)
-    case Leader(state, leaderState, timer) if aer.success =>
+    case NodeRole.Leader(state, leaderState, timer) if aer.success =>
       val newLeaderState = leaderState.appendSuccessful(aer.followerId, aer.prevLog, aer.entryCount)
       // If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
       val newCommitIndex =
@@ -200,13 +200,13 @@ class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf
           newState2 <- applyEntries(newState)
           _ <- ZIO.foreachPar(responses)(identity)
           newTimer <- sendAppendEntries(newState2, newLeaderState2, timer)
-        } yield Leader(newState2, newLeaderState2, newTimer)
-      else ZIO.succeed(Leader(state, newLeaderState, timer))
+        } yield NodeRole.Leader(newState2, newLeaderState2, newTimer)
+      else ZIO.succeed(NodeRole.Leader(state, newLeaderState, timer))
 
     // If AppendEntries fails because of log inconsistency: decrement nextIndex and retry (§5.3)
-    case Leader(state, leaderState, timer) =>
+    case NodeRole.Leader(state, leaderState, timer) =>
       val newLeaderState = leaderState.appendFailed(aer.followerId, aer.prevLog)
-      sendAppendEntry(aer.followerId, state, newLeaderState).as(Leader(state, newLeaderState, timer))
+      sendAppendEntry(aer.followerId, state, newLeaderState).as(NodeRole.Leader(state, newLeaderState, timer))
 
   //
 
