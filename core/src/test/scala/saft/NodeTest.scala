@@ -5,20 +5,42 @@ import zio.test.*
 
 object NodeTest extends ZIOSpecDefault:
   def spec: Spec[Any, Throwable] =
+    val forward5seconds = TestClock.adjust(Duration.fromSeconds(5))
     suite("NodeTest")(
       test("should replicate a single entry") {
-        // given
         for {
+          // given
           fixture <- startNodes(Conf.default(5))
           // when
-          _ <- TestClock.adjust(Duration.fromSeconds(5)) // elect leader
+          _ <- forward5seconds // elect leader
           _ <- newEntry(LogData("entry1"), fixture.comms)
-          _ <- TestClock.adjust(Duration.fromSeconds(5)) // replicate
+          _ <- forward5seconds // replicate
           // then
           results <- ZIO.foreach(fixture.conf.nodeIds)(nodeId => fixture.applied(nodeId).get.map(a => assertTrue(a == Vector("entry1"))))
           // finally
           _ <- fixture.interrupt
         } yield results.reduce(_ && _)
+      },
+      test("should replicate an entry after the leader is interrupted") {
+        for {
+          // given
+          fixture <- startNodes(Conf.default(5))
+          // when
+          _ <- forward5seconds // elect leader
+          leader <- newEntry(LogData("entry1"), fixture.comms)
+          _ <- forward5seconds // replicate
+          _ <- fixture.fibers(leader).interrupt
+          _ <- forward5seconds // elect new leader
+          _ <- newEntry(LogData("entry2"), fixture.comms)
+          _ <- forward5seconds // replicate
+          // then
+          leaderResult <- fixture.applied(leader).get.map(a => assertTrue(a == Vector("entry1")))
+          results <- ZIO.foreach(fixture.conf.nodeIds.filterNot(_ == leader))(nodeId =>
+            fixture.applied(nodeId).get.map(a => assertTrue(a == Vector("entry1", "entry2")))
+          )
+          // finally
+          _ <- fixture.interrupt
+        } yield leaderResult && results.reduce(_ && _)
       }
     )
 
@@ -46,13 +68,13 @@ object NodeTest extends ZIOSpecDefault:
     } yield TestFixture(conf, nodes, comms, fibers, applied)
 
   /** Trying adding a new entry to each node in turn, until a leader is found. */
-  def newEntry(data: LogData, comms: Map[NodeId, Comms]): Task[Unit] =
-    def doRun(cs: List[(NodeId, Comms)]): Task[Unit] = cs match
+  def newEntry(data: LogData, comms: Map[NodeId, Comms]): Task[NodeId] =
+    def doRun(cs: List[(NodeId, Comms)]): Task[NodeId] = cs match
       case Nil => ZIO.fail(new RuntimeException(s"Cannot send new entry $data, no leader"))
       case (n, c) :: tail =>
         request(n, NewEntry(data), c).flatMap {
           case RedirectToLeaderResponse(_)       => doRun(tail)
-          case NewEntryAddedSuccessfullyResponse => ZIO.unit
+          case NewEntryAddedSuccessfullyResponse => ZIO.succeed(n)
           case r => ZIO.fail(new RuntimeException(s"When sending a new entry request, got unexpected response: $r"))
         }
     doRun(comms.toList)
