@@ -17,7 +17,7 @@ object SaftSim extends ZIOAppDefault with Logging {
       stateMachines <- ZIO.foreach(conf.nodeIds)(nodeId => StateMachine.background(applyLogData(nodeId)).map(nodeId -> _)).map(_.toMap)
       persistence <- InMemoryPersistence(conf.nodeIds)
       nodes = conf.nodeIds.toList
-        .map(nodeId => nodeId -> new Node2(nodeId, comms(nodeId), stateMachines(nodeId), conf, persistence.forNodeId(nodeId)))
+        .map(nodeId => nodeId -> new Node(nodeId, comms(nodeId), stateMachines(nodeId), conf, persistence.forNodeId(nodeId)))
         .toMap
       _ <- ZIO.log("Welcome to SaftSim - Scala Raft simulation. Available commands:")
       _ <- ZIO.log("E - exit; Nn data - send new entry <data> to node <n>; Kn - kill node n; Sn - start node n")
@@ -30,7 +30,7 @@ object SaftSim extends ZIOAppDefault with Logging {
   private case class RunDone()
 
   private def handleCommands(
-      nodes: Map[NodeId, Node2],
+      nodes: Map[NodeId, Node],
       comms: Map[NodeId, InMemoryComms]
   ): IO[IOException, RunDone] =
     val newEntryPattern = "N(\\d+) (.+)".r
@@ -73,7 +73,7 @@ object SaftSim extends ZIOAppDefault with Logging {
 private class InMemoryComms(nodeId: NodeId, eventQueues: Map[NodeId, Queue[ServerEvent]]) extends Comms:
   private val eventQueue = eventQueues(nodeId)
 
-  override def nextEvent: UIO[ServerEvent] = eventQueue.take
+  override def next: UIO[ServerEvent] = eventQueue.take
 
   override def send(toNodeId: NodeId, msg: RequestMessage with FromServerMessage): UIO[Unit] =
     eventQueues(toNodeId)

@@ -13,7 +13,7 @@ private enum NodeRole:
   case Leader(state: ServerState, leaderState: LeaderState, timer: Timer) extends NodeRole
 
 /** A Raft node. Communicates with the outside world using [[comms]]. Committed logs are applied to [[stateMachine]]. */
-class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf, persistence: Persistence) {
+class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf, persistence: Persistence) {
   private val otherNodes = conf.nodeIds.toSet - nodeId
 
   def start: UIO[Nothing] = (for {
@@ -27,7 +27,7 @@ class Node2(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf
   } yield result).onExit(_ => ZIO.log("Node stopped"))
 
   private def run(role: NodeRole): UIO[Nothing] =
-    comms.nextEvent
+    comms.next
       .tap(_ =>
         role match
           case _: NodeRole.Follower  => setStateLogAnnotation("follower")

@@ -33,7 +33,7 @@ class SaftHttp(nodeNumber: Int, persistencePath: JPath) extends ZIOAppDefault wi
       queue <- Queue.sliding[ServerEvent](16)
       backend <- HttpClientZioBackend()
       comms = new HttpComms(queue, backend, clientTimeout, nodePort)
-      node = new Node2(nodeId, comms, stateMachine, conf, persistence)
+      node = new Node(nodeId, comms, stateMachine, conf, persistence)
       _ <- ZIO.log(s"Starting SaftHttp on localhost:$port")
       _ <- ZIO.log(s"Configuration: ${conf.show}")
       _ <- node.start.fork
@@ -74,7 +74,7 @@ private case class DecodeException(msg: String) extends Exception(msg)
 private class HttpComms(queue: Queue[ServerEvent], backend: SttpBackend[Task, Any], clientTimeout: Duration, nodePort: NodeId => Int)
     extends Comms
     with JsonCodecs {
-  override def nextEvent: UIO[ServerEvent] = queue.take
+  override def next: UIO[ServerEvent] = queue.take
   override def send(toNodeId: NodeId, msg: RequestMessage with FromServerMessage): UIO[Unit] =
     import sttp.client3.*
     val url = uri"http://localhost:${nodePort(toNodeId)}/${endpoint(msg)}"
