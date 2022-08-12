@@ -11,7 +11,7 @@ case class ServerState(
 ):
   def updateTerm(observedTerm: Term): ServerState =
     if observedTerm > currentTerm
-    Ļthen copy(currentTerm = observedTerm, votedFor = None)
+    then copy(currentTerm = observedTerm, votedFor = None)
     else this
 
   def incrementTerm(self: NodeId): ServerState = copy(currentTerm = Term(currentTerm + 1), votedFor = Some(self))
