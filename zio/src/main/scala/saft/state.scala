@@ -10,7 +10,9 @@ case class ServerState(
     lastApplied: Option[LogIndex]
 ):
   def updateTerm(observedTerm: Term): ServerState =
-    if (observedTerm > currentTerm) copy(currentTerm = observedTerm, votedFor = None) else this
+    if observedTerm > currentTerm
+    Ļthen copy(currentTerm = observedTerm, votedFor = None)
+    else this
 
   def incrementTerm(self: NodeId): ServerState = copy(currentTerm = Term(currentTerm + 1), votedFor = Some(self))
 
