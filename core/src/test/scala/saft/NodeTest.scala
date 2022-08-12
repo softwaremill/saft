@@ -81,7 +81,7 @@ object NodeTest extends ZIOSpecDefault:
 
   def request(toNodeId: NodeId, msg: RequestMessage, comms: Comms): Task[ResponseMessage] = for {
     p <- Promise.make[Nothing, ResponseMessage]
-    _ <- comms.add(RequestReceived(msg, p.succeed(_).unit))
+    _ <- comms.add(ServerEvent.RequestReceived(msg, p.succeed(_).unit))
     r <- p.await
       .timeoutFail(new RuntimeException(s"Timeout while waiting for a response to $msg sent to $toNodeId"))(
         Duration.fromSeconds(1)

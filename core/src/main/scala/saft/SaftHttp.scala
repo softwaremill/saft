@@ -61,7 +61,7 @@ class SaftHttp(nodeNumber: Int, persistencePath: JPath) extends ZIOAppDefault wi
       case Right(msg) =>
         for {
           p <- Promise.make[Nothing, ResponseMessage]
-          _ <- queue.offer(RequestReceived(msg, r => p.succeed(r).unit))
+          _ <- queue.offer(ServerEvent.RequestReceived(msg, r => p.succeed(r).unit))
           r <- p.await.timeoutFail(TimedOutException(s"Handling request message: $msg"))(Duration.fromSeconds(1))
         } yield Response.text(encodeResponse(r))
       case Left(errorMsg) => ZIO.fail(DecodeException(s"Handling request message: $errorMsg"))
@@ -85,7 +85,7 @@ private class HttpComms(queue: Queue[ServerEvent], backend: SttpBackend[Task, An
       .flatMap { body =>
         decodeResponse(msg, body) match
           case Left(errorMsg) => ZIO.fail(DecodeException(s"Client request $msg to $url, response: $body, error: $errorMsg"))
-          case Right(decoded) => queue.offer(ResponseReceived(decoded))
+          case Right(decoded) => queue.offer(ServerEvent.ResponseReceived(decoded))
       }
       .unit
       .catchAll { case e: Exception => ZIO.logErrorCause(s"Cannot send $msg to $toNodeId", Cause.fail(e)) }

@@ -37,7 +37,7 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
       .tap(e => ZIO.logDebug(s"Next event: $e"))
       .flatMap {
         // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
-        case e @ RequestReceived(msg: FromServerMessage, _) if msg.term > role.state.currentTerm =>
+        case e @ ServerEvent.RequestReceived(msg: FromServerMessage, _) if msg.term > role.state.currentTerm =>
           val state = role.state
           val newState = state.updateTerm(msg.term)
           for {
@@ -51,15 +51,15 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
 
   private def handleEvent(event: ServerEvent, role: NodeRole): UIO[NodeRole] =
     (event match
-      case Timeout => timeout(role).map((ZIO.unit, _))
-      case RequestReceived(rv: RequestVote, respond) =>
+      case ServerEvent.Timeout => timeout(role).map((ZIO.unit, _))
+      case ServerEvent.RequestReceived(rv: RequestVote, respond) =>
         requestVote(rv, role).map((response, newRole) => (doRespond(response, respond), newRole))
-      case RequestReceived(ae: AppendEntries, respond) =>
+      case ServerEvent.RequestReceived(ae: AppendEntries, respond) =>
         appendEntries(ae, role).map((response, newRole) => (doRespond(response, respond), newRole))
-      case RequestReceived(ne: NewEntry, respond) =>
+      case ServerEvent.RequestReceived(ne: NewEntry, respond) =>
         newEntry(ne, role).map((responsePromise, newRole) => (responsePromise.await.flatMap(doRespond(_, respond)).fork.unit, newRole))
-      case ResponseReceived(rvr: RequestVoteResponse)   => requestVoteResponse(rvr, role).map((ZIO.unit, _))
-      case ResponseReceived(aer: AppendEntriesResponse) => appendEntriesResponse(aer, role).map((ZIO.unit, _))
+      case ServerEvent.ResponseReceived(rvr: RequestVoteResponse)   => requestVoteResponse(rvr, role).map((ZIO.unit, _))
+      case ServerEvent.ResponseReceived(aer: AppendEntriesResponse) => appendEntriesResponse(aer, role).map((ZIO.unit, _))
     ).flatMap((response, newRole) => persistAndRespond(response, role, newRole))
 
   private def timeout(role: NodeRole): UIO[NodeRole] =
@@ -252,7 +252,7 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
   *   cancel the timer.
   */
 private class Timer(conf: Conf, comms: Comms, currentTimer: Fiber.Runtime[Nothing, Unit]):
-  private def restart(timeout: UIO[Timeout.type]): UIO[Timer] =
+  private def restart(timeout: UIO[ServerEvent.Timeout.type]): UIO[Timer] =
     for {
       _ <- currentTimer.interrupt
       newFiber <- timeout.flatMap(comms.add).fork
