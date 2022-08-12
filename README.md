@@ -8,7 +8,7 @@ If you're new to Scala, you might want to setup your environment first, installi
 
 To run the provided in-memory Raft simulation, using 5 nodes, use the following:
 
-```scala
+```bash
 sbt "zio/runMain saft.SaftSim"
 ```
 
