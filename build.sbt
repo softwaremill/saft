@@ -8,12 +8,12 @@ lazy val commonSettings = commonSmlBuildSettings ++ Seq(
 lazy val rootProject = (project in file("."))
   .settings(commonSettings: _*)
   .settings(publishArtifact := false, name := "saft")
-  .aggregate(core)
+  .aggregate(zio)
 
-lazy val core: Project = (project in file("core"))
+lazy val zio: Project = (project in file("zio"))
   .settings(commonSettings: _*)
   .settings(
-    name := "core",
+    name := "zio",
     libraryDependencies ++= Seq(
       "dev.zio" %% "zio" % "2.0.0",
       "dev.zio" %% "zio-logging" % "2.0.1",
