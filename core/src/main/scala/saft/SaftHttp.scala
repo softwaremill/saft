@@ -14,7 +14,7 @@ object SaftHttp1 extends SaftHttp(1, JPath.of("saft1.json"))
 object SaftHttp2 extends SaftHttp(2, JPath.of("saft2.json"))
 object SaftHttp3 extends SaftHttp(3, JPath.of("saft3.json"))
 
-/** A Raft implementation using json-over-http for inter-node communication. */
+/** A Raft implementation using json-over-http for inter-node communication and json file-based persistence. */
 class SaftHttp(nodeNumber: Int, persistencePath: JPath) extends ZIOAppDefault with JsonCodecs with Logging {
   override val run: Task[Nothing] =
     // configuration

@@ -81,7 +81,7 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
       newTimer <- timer.restartElection
       // Send RequestVote RPCs to all other servers
       _ <- ZIO.foreachDiscard(otherNodes)(otherNodeId =>
-        doSend(otherNodeId, RequestVote(newState.currentTerm, nodeId, newState.lastEntryTerm))
+        doSend(otherNodeId, RequestVote(newState.currentTerm, nodeId, newState.lastIndexTerm))
       )
     } yield NodeRole.Candidate(newState, CandidateState(1), newTimer)
 
@@ -166,7 +166,7 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
   private def startLeader(state: ServerState, timer: Timer): UIO[NodeRole] = {
     val leaderState = LeaderState(
       // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
-      otherNodes.map(_ -> state.lastEntryTerm.map(_.index).fold(LogIndex(0))(i => LogIndex(i + 1))).toMap,
+      otherNodes.map(_ -> state.lastIndexTerm.map(_.index).fold(LogIndex(0))(i => LogIndex(i + 1))).toMap,
       // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
       otherNodes.map(_ -> None).toMap,
       Vector.empty
@@ -190,7 +190,7 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
         newLeaderState.commitIndex(if state.log.isEmpty then None else Some(LogIndex(state.log.length - 1)), conf.majority)
       if newCommitIndex.exists(_ > state.commitIndex.getOrElse(-1)) && state.log.lastOption.map(_.term).contains(state.currentTerm)
       then
-        val newState = state.commitIndex(newCommitIndex)
+        val newState = state.setCommitIndex(newCommitIndex)
         val (newLeaderState2, responses) = newCommitIndex match
           case None     => (newLeaderState, Vector.empty)
           case Some(ci) => newLeaderState.removeAwaitingResponses(ci)
