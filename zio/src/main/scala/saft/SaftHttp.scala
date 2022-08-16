@@ -6,9 +6,10 @@ import zio.*
 import zio.json.*
 import zhttp.http.*
 import zhttp.service.Server
+import zio.json.internal.Write
 
 import java.io.File
-import java.nio.file.{Files, Path => JPath}
+import java.nio.file.{Files, Path as JPath}
 
 object SaftHttp1 extends SaftHttp(1, JPath.of("saft1.json"))
 object SaftHttp2 extends SaftHttp(2, JPath.of("saft2.json"))
@@ -123,7 +124,11 @@ private trait JsonCodecs {
   given JsonDecoder[NewEntryAddedSuccessfullyResponse.type] = DeriveJsonDecoder.gen[NewEntryAddedSuccessfullyResponse.type]
   given JsonEncoder[NewEntryAddedSuccessfullyResponse.type] = DeriveJsonEncoder.gen[NewEntryAddedSuccessfullyResponse.type]
   given JsonDecoder[RedirectToLeaderResponse] = DeriveJsonDecoder.gen[RedirectToLeaderResponse]
-  given JsonEncoder[RedirectToLeaderResponse] = DeriveJsonEncoder.gen[RedirectToLeaderResponse]
+  given JsonEncoder[RedirectToLeaderResponse] = {
+    val delegate = JsonEncoder.option(summon[JsonEncoder[NodeId]])
+    given JsonEncoder[Option[NodeId]] = (a: Option[NodeId], indent: Option[Int], out: Write) => delegate.unsafeEncode(a, indent, out)
+    DeriveJsonEncoder.gen[RedirectToLeaderResponse]
+  }
 
   def encodeResponse(r: ResponseMessage): String = r match
     case r: RequestVoteResponse                    => r.toJson
