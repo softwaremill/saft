@@ -18,7 +18,7 @@ lazy val zio: Project = (project in file("zio"))
       "dev.zio" %% "zio" % "2.0.0",
       "dev.zio" %% "zio-logging" % "2.1.0",
       "io.d11" %% "zhttp" % "2.0.0-RC10",
-      "dev.zio" %% "zio-json" % "0.3.0-RC10",
+      "dev.zio" %% "zio-json" % "0.3.0-RC11",
       "com.softwaremill.sttp.client3" %% "zio" % "3.7.2",
       "dev.zio" %% "zio-test" % "2.0.0" % Test,
       "dev.zio" %% "zio-test-sbt" % "2.0.0" % Test
