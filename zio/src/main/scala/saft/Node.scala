@@ -37,7 +37,7 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
       .tap(e => ZIO.logDebug(s"Next event: $e"))
       .flatMap {
         // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
-        case e @ RequestReceived(msg: FromServerMessage, _) if msg.term > role.state.currentTerm =>
+        case e @ ServerEvent.RequestReceived(msg: FromServerMessage, _) if msg.term > role.state.currentTerm =>
           val state = role.state
           val newState = state.updateTerm(msg.term)
           for {
@@ -51,15 +51,15 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
 
   private def handleEvent(event: ServerEvent, role: NodeRole): UIO[NodeRole] =
     (event match
-      case Timeout => timeout(role).map((ZIO.unit, _))
-      case RequestReceived(rv: RequestVote, respond) =>
+      case ServerEvent.Timeout => timeout(role).map((ZIO.unit, _))
+      case ServerEvent.RequestReceived(rv: RequestVote, respond) =>
         requestVote(rv, role).map((response, newRole) => (doRespond(response, respond), newRole))
-      case RequestReceived(ae: AppendEntries, respond) =>
+      case ServerEvent.RequestReceived(ae: AppendEntries, respond) =>
         appendEntries(ae, role).map((response, newRole) => (doRespond(response, respond), newRole))
-      case RequestReceived(ne: NewEntry, respond) =>
+      case ServerEvent.RequestReceived(ne: NewEntry, respond) =>
         newEntry(ne, role).map((responsePromise, newRole) => (responsePromise.await.flatMap(doRespond(_, respond)).fork.unit, newRole))
-      case ResponseReceived(rvr: RequestVoteResponse)   => requestVoteResponse(rvr, role).map((ZIO.unit, _))
-      case ResponseReceived(aer: AppendEntriesResponse) => appendEntriesResponse(aer, role).map((ZIO.unit, _))
+      case ServerEvent.ResponseReceived(rvr: RequestVoteResponse)   => requestVoteResponse(rvr, role).map((ZIO.unit, _))
+      case ServerEvent.ResponseReceived(aer: AppendEntriesResponse) => appendEntriesResponse(aer, role).map((ZIO.unit, _))
     ).flatMap((response, newRole) => persistAndRespond(response, role, newRole))
 
   private def timeout(role: NodeRole): UIO[NodeRole] =
@@ -81,7 +81,7 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
       newTimer <- timer.restartElection
       // Send RequestVote RPCs to all other servers
       _ <- ZIO.foreachDiscard(otherNodes)(otherNodeId =>
-        doSend(otherNodeId, RequestVote(newState.currentTerm, nodeId, newState.lastEntryTerm))
+        doSend(otherNodeId, RequestVote(newState.currentTerm, nodeId, newState.lastIndexTerm))
       )
     } yield NodeRole.Candidate(newState, CandidateState(1), newTimer)
 
@@ -166,7 +166,7 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
   private def startLeader(state: ServerState, timer: Timer): UIO[NodeRole] = {
     val leaderState = LeaderState(
       // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
-      otherNodes.map(_ -> state.lastEntryTerm.map(_.index).fold(LogIndex(0))(i => LogIndex(i + 1))).toMap,
+      otherNodes.map(_ -> state.lastIndexTerm.map(_.index).fold(LogIndex(0))(i => LogIndex(i + 1))).toMap,
       // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
       otherNodes.map(_ -> None).toMap,
       Vector.empty
@@ -190,7 +190,7 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
         newLeaderState.commitIndex(if state.log.isEmpty then None else Some(LogIndex(state.log.length - 1)), conf.majority)
       if newCommitIndex.exists(_ > state.commitIndex.getOrElse(-1)) && state.log.lastOption.map(_.term).contains(state.currentTerm)
       then
-        val newState = state.commitIndex(newCommitIndex)
+        val newState = state.setCommitIndex(newCommitIndex)
         val (newLeaderState2, responses) = newCommitIndex match
           case None     => (newLeaderState, Vector.empty)
           case Some(ci) => newLeaderState.removeAwaitingResponses(ci)
@@ -252,7 +252,7 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
   *   cancel the timer.
   */
 private class Timer(conf: Conf, comms: Comms, currentTimer: Fiber.Runtime[Nothing, Unit]):
-  private def restart(timeout: UIO[Timeout.type]): UIO[Timer] =
+  private def restart(timeout: UIO[ServerEvent.Timeout.type]): UIO[Timer] =
     for {
       _ <- currentTimer.interrupt
       newFiber <- timeout.flatMap(comms.add).fork

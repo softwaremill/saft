@@ -6,15 +6,16 @@ import zio.*
 import zio.json.*
 import zhttp.http.*
 import zhttp.service.Server
+import zio.json.internal.Write
 
 import java.io.File
-import java.nio.file.{Files, Path => JPath}
+import java.nio.file.{Files, Path as JPath}
 
 object SaftHttp1 extends SaftHttp(1, JPath.of("saft1.json"))
 object SaftHttp2 extends SaftHttp(2, JPath.of("saft2.json"))
 object SaftHttp3 extends SaftHttp(3, JPath.of("saft3.json"))
 
-/** A Raft implementation using json-over-http for inter-node communication. */
+/** A Raft implementation using json-over-http for inter-node communication and json file-based persistence. */
 class SaftHttp(nodeNumber: Int, persistencePath: JPath) extends ZIOAppDefault with JsonCodecs with Logging {
   override val run: Task[Nothing] =
     // configuration
@@ -61,7 +62,7 @@ class SaftHttp(nodeNumber: Int, persistencePath: JPath) extends ZIOAppDefault wi
       case Right(msg) =>
         for {
           p <- Promise.make[Nothing, ResponseMessage]
-          _ <- queue.offer(RequestReceived(msg, r => p.succeed(r).unit))
+          _ <- queue.offer(ServerEvent.RequestReceived(msg, r => p.succeed(r).unit))
           r <- p.await.timeoutFail(TimedOutException(s"Handling request message: $msg"))(Duration.fromSeconds(1))
         } yield Response.text(encodeResponse(r))
       case Left(errorMsg) => ZIO.fail(DecodeException(s"Handling request message: $errorMsg"))
@@ -85,7 +86,7 @@ private class HttpComms(queue: Queue[ServerEvent], backend: SttpBackend[Task, An
       .flatMap { body =>
         decodeResponse(msg, body) match
           case Left(errorMsg) => ZIO.fail(DecodeException(s"Client request $msg to $url, response: $body, error: $errorMsg"))
-          case Right(decoded) => queue.offer(ResponseReceived(decoded))
+          case Right(decoded) => queue.offer(ServerEvent.ResponseReceived(decoded))
       }
       .unit
       .catchAll { case e: Exception => ZIO.logErrorCause(s"Cannot send $msg to $toNodeId", Cause.fail(e)) }
@@ -123,7 +124,11 @@ private trait JsonCodecs {
   given JsonDecoder[NewEntryAddedSuccessfullyResponse.type] = DeriveJsonDecoder.gen[NewEntryAddedSuccessfullyResponse.type]
   given JsonEncoder[NewEntryAddedSuccessfullyResponse.type] = DeriveJsonEncoder.gen[NewEntryAddedSuccessfullyResponse.type]
   given JsonDecoder[RedirectToLeaderResponse] = DeriveJsonDecoder.gen[RedirectToLeaderResponse]
-  given JsonEncoder[RedirectToLeaderResponse] = DeriveJsonEncoder.gen[RedirectToLeaderResponse]
+  given JsonEncoder[RedirectToLeaderResponse] = {
+    val delegate = JsonEncoder.option(summon[JsonEncoder[NodeId]])
+    given JsonEncoder[Option[NodeId]] = (a: Option[NodeId], indent: Option[Int], out: Write) => delegate.unsafeEncode(a, indent, out)
+    DeriveJsonEncoder.gen[RedirectToLeaderResponse]
+  }
 
   def encodeResponse(r: ResponseMessage): String = r match
     case r: RequestVoteResponse                    => r.toJson

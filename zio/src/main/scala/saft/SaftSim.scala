@@ -47,7 +47,7 @@ object SaftSim extends ZIOAppDefault with Logging {
             case None => ZIO.log(s"Unknown node: $nodeNumber") *> handleNextCommand(fibers)
             case Some(comm) =>
               comm
-                .add(RequestReceived(NewEntry(LogData(data)), responseMessage => ZIO.log(s"Response: $responseMessage")))
+                .add(ServerEvent.RequestReceived(NewEntry(LogData(data)), responseMessage => ZIO.log(s"Response: $responseMessage")))
                 .unit *> handleNextCommand(fibers)
 
         case killPattern(nodeNumber) =>
@@ -78,10 +78,10 @@ private class InMemoryComms(nodeId: NodeId, eventQueues: Map[NodeId, Queue[Serve
   override def send(toNodeId: NodeId, msg: RequestMessage with FromServerMessage): UIO[Unit] =
     eventQueues(toNodeId)
       .offer(
-        RequestReceived(
+        ServerEvent.RequestReceived(
           msg,
           {
-            case serverMsg: ToServerMessage => eventQueues(nodeId).offer(ResponseReceived(serverMsg)).unit
+            case serverMsg: ToServerMessage => eventQueues(nodeId).offer(ServerEvent.ResponseReceived(serverMsg)).unit
             case _                          => ZIO.unit // ignore, as inter-node communication doesn't use client messages
           }
         )

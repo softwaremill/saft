@@ -1,5 +1,11 @@
 package saft
 
+/** Base trait for messages that are sent between servers and clients. Messages are be classified:
+  *
+  *   - basing on the recipient (whether the message is sent '''to''' a server or a client)
+  *   - basing on the sender (if a message is sent '''from''' a server)
+  *   - if the message is a '''request''', or a '''response'''
+  */
 sealed trait Message
 
 /** A message (request or response) that can be sent to a server. */
@@ -17,6 +23,8 @@ sealed trait ResponseMessage extends Message
 
 /** A message that can be sent to a client; always a response. */
 sealed trait ToClientMessage extends ResponseMessage
+
+//
 
 case class RequestVote(term: Term, candidateId: NodeId, lastLog: Option[LogIndexTerm]) extends RequestMessage with FromServerMessage
 case class RequestVoteResponse(term: Term, voteGranted: Boolean) extends ResponseMessage with ToServerMessage with FromServerMessage

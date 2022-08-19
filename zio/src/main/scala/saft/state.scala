@@ -10,17 +10,19 @@ case class ServerState(
     lastApplied: Option[LogIndex]
 ):
   def updateTerm(observedTerm: Term): ServerState =
-    if (observedTerm > currentTerm) copy(currentTerm = observedTerm, votedFor = None) else this
+    if observedTerm > currentTerm
+    then copy(currentTerm = observedTerm, votedFor = None)
+    else this
 
   def incrementTerm(self: NodeId): ServerState = copy(currentTerm = Term(currentTerm + 1), votedFor = Some(self))
 
   def voteFor(other: NodeId): ServerState = copy(votedFor = Some(other))
 
-  def lastEntryTerm: Option[LogIndexTerm] = log.lastOption.map(lastLogEntry => LogIndexTerm(lastLogEntry.term, LogIndex(log.length - 1)))
+  def lastIndexTerm: Option[LogIndexTerm] = log.lastOption.map(lastLogEntry => LogIndexTerm(lastLogEntry.term, LogIndex(log.length - 1)))
 
   def votedForOtherThan(candidateId: NodeId): Boolean = votedFor.nonEmpty && !votedFor.contains(candidateId)
 
-  def hasEntriesAfter(t: Option[LogIndexTerm]): Boolean = (t, lastEntryTerm) match
+  def hasEntriesAfter(t: Option[LogIndexTerm]): Boolean = (t, lastIndexTerm) match
     case (None, None)    => false
     case (None, _)       => true
     case (Some(_), None) => false
@@ -36,7 +38,7 @@ case class ServerState(
   def appendEntries(entries: Vector[LogEntry], afterIndex: Option[LogIndex]): ServerState =
     copy(log = log.take(afterIndex.getOrElse(-1) + 1) ++ entries)
 
-  def commitIndex(newCommitIndex: Option[LogIndex]): ServerState = copy(commitIndex = newCommitIndex)
+  def setCommitIndex(newCommitIndex: Option[LogIndex]): ServerState = copy(commitIndex = newCommitIndex)
 
   def updateCommitIndex(leaderCommitIndex: Option[LogIndex]): ServerState = (commitIndex, leaderCommitIndex) match
     case (Some(ours), Some(leader)) if ours < leader => copy(commitIndex = leaderCommitIndex)
@@ -56,7 +58,8 @@ object ServerState:
   val Initial: ServerState = ServerState(Vector.empty, None, Term(0), None, None)
 
 /** @param awaitingResponses
-  *   Needed to properly reply to [[NewEntry]] requests once entries are replicated.
+  *   A collection on monotonically increasing log indexes, along with effects describing a reply to a [[NewEntry]] request, which should be
+  *   run once the entry at the given index is replicated.
   */
 case class LeaderState(
     nextIndex: Map[NodeId, LogIndex],
