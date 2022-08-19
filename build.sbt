@@ -19,7 +19,7 @@ lazy val core: Project = (project in file("core"))
       "dev.zio" %% "zio-logging" % "2.0.1",
       "io.d11" %% "zhttp" % "2.0.0-RC10",
       "dev.zio" %% "zio-json" % "0.3.0-RC10",
-      "com.softwaremill.sttp.client3" %% "zio" % "3.7.4",
+      "com.softwaremill.sttp.client3" %% "zio" % "3.7.2",
       "dev.zio" %% "zio-test" % "2.0.0" % Test,
       "dev.zio" %% "zio-test-sbt" % "2.0.0" % Test
     ),
