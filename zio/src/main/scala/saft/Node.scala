@@ -28,12 +28,7 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
 
   private def run(role: NodeRole): UIO[Nothing] =
     comms.next
-      .tap(_ =>
-        role match
-          case _: NodeRole.Follower  => setStateLogAnnotation("follower")
-          case _: NodeRole.Candidate => setStateLogAnnotation("candidate")
-          case _: NodeRole.Leader    => setStateLogAnnotation("leader")
-      )
+      .tap(_ => setLogAnnotation(role))
       .tap(e => ZIO.logDebug(s"Next event: $e"))
       .flatMap {
         // If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower (§5.1)
@@ -245,6 +240,12 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
     ZIO.logDebug(s"Send to node${to.number}: $msg") *> comms.send(to, msg).fork
 
   private def doRespond(msg: ResponseMessage, respond: ResponseMessage => UIO[Unit]) = ZIO.logDebug(s"Response: $msg") *> respond(msg)
+
+  private def setLogAnnotation(role: NodeRole): UIO[Unit] =
+    role match
+      case _: NodeRole.Follower  => setRoleLogAnnotation("follower")
+      case _: NodeRole.Candidate => setRoleLogAnnotation("candidate")
+      case _: NodeRole.Leader    => setRoleLogAnnotation("leader")
 }
 
 /** @param currentTimer

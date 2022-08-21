@@ -1,7 +1,5 @@
 package saft
 
-import zio.UIO
-
 /** Provides communication for a single server node, managing a server's event queue and providing a way to add events to event queues of
   * other servers.
   */

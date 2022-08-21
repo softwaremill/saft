@@ -3,7 +3,7 @@
 <configuration scan="true">
   <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
     <encoder>
-      <pattern>%d{HH:mm:ss.SSS}%boldYellow( [%X{nodeId} %X{state}] ) %-5level %logger{5} - %msg%n%rEx</pattern>
+      <pattern>%d{HH:mm:ss.SSS}%boldYellow( [%X{nodeId} %X{role}] ) %-5level %logger{5} - %msg%n%rEx</pattern>
     </encoder>
   </appender>
 

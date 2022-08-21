@@ -1,7 +1,7 @@
 package saft
 
 import com.typesafe.scalalogging.StrictLogging
-import Logging.{setNodeLogAnnotation, setStateLogAnnotation}
+import Logging.{setNodeLogAnnotation, setRoleLogAnnotation}
 
 import java.security.SecureRandom
 import java.util.concurrent.{CompletableFuture, Future, TimeUnit}
@@ -34,18 +34,13 @@ class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf,
 private class NodeLoop(loom: Loom, nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf, persistence: Persistence)
     extends StrictLogging:
   private val otherNodes = conf.nodeIds.toSet - nodeId
-
-  def run(role: NodeRole): Nothing = doRun(role)
+  private val NoResponse: () => Unit = () => ()
 
   @tailrec
-  private def doRun(role: NodeRole): Nothing =
+  final def run(role: NodeRole): Nothing =
     val event = comms.next
 
-    role match
-      case _: NodeRole.Follower  => setStateLogAnnotation("follower")
-      case _: NodeRole.Candidate => setStateLogAnnotation("candidate")
-      case _: NodeRole.Leader    => setStateLogAnnotation("leader")
-
+    setLogAnnotation(role)
     logger.debug(s"Next event: $event")
 
     val newRole = event match
@@ -59,25 +54,25 @@ private class NodeLoop(loom: Loom, nodeId: NodeId, comms: Comms, stateMachine: S
         handleEvent(e, NodeRole.Follower(newState, FollowerState(None), newTimer))
       case e => handleEvent(e, role)
 
-    doRun(newRole)
+    run(newRole)
 
   private def handleEvent(event: ServerEvent, role: NodeRole): NodeRole =
-    val (response, newRole) = event match
-      case ServerEvent.Timeout => (() => (), timeout(role))
+    val (sendResponse, newRole) = event match
+      case ServerEvent.Timeout => (NoResponse, timeout(role))
       case ServerEvent.RequestReceived(rv: RequestVote, respond) =>
-        val (r, nr) = requestVote(rv, role)
-        (() => doRespond(r, respond), nr)
+        val (response, newRole) = requestVote(rv, role)
+        (() => doRespond(response, respond), newRole)
       case ServerEvent.RequestReceived(ae: AppendEntries, respond) =>
-        val (r, nr) = appendEntries(ae, role)
-        (() => doRespond(r, respond), nr)
+        val (response, newRole) = appendEntries(ae, role)
+        (() => doRespond(response, respond), newRole)
       case ServerEvent.RequestReceived(ne: NewEntry, respond) =>
-        println("NEW ENTRY " + ne)
-        val (responseFuture, nr) = newEntry(ne, role)
-        (() => { loom.fork { doRespond(responseFuture.get, respond) }; () }, nr)
-      case ServerEvent.ResponseReceived(rvr: RequestVoteResponse)   => (() => (), requestVoteResponse(rvr, role))
-      case ServerEvent.ResponseReceived(aer: AppendEntriesResponse) => (() => (), appendEntriesResponse(aer, role))
+        val (responseFuture, newRole) = newEntry(ne, role)
+        (() => loom.fork(doRespond(responseFuture.get, respond)): Unit, newRole)
+      case ServerEvent.ResponseReceived(rvr: RequestVoteResponse)   => (NoResponse, requestVoteResponse(rvr, role))
+      case ServerEvent.ResponseReceived(aer: AppendEntriesResponse) => (NoResponse, appendEntriesResponse(aer, role))
 
-    persistAndRespond(response, role, newRole)
+    persistAndRespond(sendResponse, role, newRole)
+    newRole
 
   private def timeout(role: NodeRole): NodeRole =
     role match
@@ -99,7 +94,7 @@ private class NodeLoop(loom: Loom, nodeId: NodeId, comms: Comms, stateMachine: S
     val newTimer = timer.restartElection
 
     // Send RequestVote RPCs to all other servers
-    for (otherNodeId <- otherNodes) doSend(otherNodeId, RequestVote(newState.currentTerm, nodeId, newState.lastIndexTerm))
+    otherNodes.foreach(otherNodeId => doSend(otherNodeId, RequestVote(newState.currentTerm, nodeId, newState.lastIndexTerm)))
 
     NodeRole.Candidate(newState, CandidateState(1), newTimer)
 
@@ -152,9 +147,7 @@ private class NodeLoop(loom: Loom, nodeId: NodeId, comms: Comms, stateMachine: S
 
   private def newEntry(ne: NewEntry, role: NodeRole): (Future[NewEntryAddedResponse], NodeRole) =
     def redirectToLeader(leaderId: Option[NodeId]) =
-      val f = new CompletableFuture[NewEntryAddedResponse]()
-      f.complete(RedirectToLeaderResponse(leaderId))
-      (f, role)
+      (CompletableFuture.completedFuture(RedirectToLeaderResponse(leaderId)): Future[NewEntryAddedResponse], role)
 
     role match
       case NodeRole.Follower(_, FollowerState(leaderId), _) => redirectToLeader(leaderId)
@@ -181,7 +174,7 @@ private class NodeLoop(loom: Loom, nodeId: NodeId, comms: Comms, stateMachine: S
     case candidate: NodeRole.Candidate => candidate
     case leader: NodeRole.Leader       => leader
 
-  private def startLeader(state: ServerState, timer: Timer): NodeRole = {
+  private def startLeader(state: ServerState, timer: Timer): NodeRole =
     val leaderState = LeaderState(
       // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
       otherNodes.map(_ -> state.lastIndexTerm.map(_.index).fold(LogIndex(0))(i => LogIndex(i + 1))).toMap,
@@ -194,7 +187,6 @@ private class NodeLoop(loom: Loom, nodeId: NodeId, comms: Comms, stateMachine: S
     logger.info(s"Became leader (term: ${state.currentTerm})")
     val newTimer = sendAppendEntries(state, leaderState, timer)
     NodeRole.Leader(state, leaderState, newTimer)
-  }
 
   def appendEntriesResponse(aer: AppendEntriesResponse, role: NodeRole): NodeRole = role match
     case follower: NodeRole.Follower   => follower
@@ -208,13 +200,13 @@ private class NodeLoop(loom: Loom, nodeId: NodeId, comms: Comms, stateMachine: S
       if newCommitIndex.exists(_ > state.commitIndex.getOrElse(-1)) && state.log.lastOption.map(_.term).contains(state.currentTerm)
       then
         val newState = state.setCommitIndex(newCommitIndex)
-        val (newLeaderState2, responses) = newCommitIndex match
+        val (newLeaderState2, sendResponses) = newCommitIndex match
           case None     => (newLeaderState, Vector.empty)
           case Some(ci) => newLeaderState.removeAwaitingResponses(ci)
 
         // respond after entry applied to state machine (§5.3)
         val newState2 = applyEntries(newState)
-        loom.fork { for (response <- responses) response() }
+        loom.fork(sendResponses.foreach(sendResponse => sendResponse()))
         val newTimer = sendAppendEntries(newState2, newLeaderState2, timer)
         NodeRole.Leader(newState2, newLeaderState2, newTimer)
       else NodeRole.Leader(state, newLeaderState, timer)
@@ -227,18 +219,17 @@ private class NodeLoop(loom: Loom, nodeId: NodeId, comms: Comms, stateMachine: S
 
   //
 
-  private def persistAndRespond(response: () => Unit, oldRole: NodeRole, newRole: NodeRole): NodeRole =
-    if needsPersistence(oldRole, newRole) then persistence(oldRole.state, newRole.state)
+  private def persistAndRespond(sendResponse: () => Unit, oldRole: NodeRole, newRole: NodeRole): Unit =
     // (Updated on stable storage before responding to RPCs)
-    response()
-    newRole
+    if needsPersistence(oldRole, newRole) then persistence(oldRole.state, newRole.state)
+    sendResponse()
 
   private def needsPersistence(oldRole: NodeRole, newRole: NodeRole): Boolean =
     oldRole.state.log != newRole.state.log || oldRole.state.votedFor != newRole.state.votedFor || oldRole.state.currentTerm != newRole.state.currentTerm
 
   private def sendAppendEntries(state: ServerState, leaderState: LeaderState, timer: Timer): Timer =
     val newTimer = timer.restartHeartbeat
-    for (otherNode <- otherNodes) sendAppendEntry(otherNode, state, leaderState)
+    otherNodes.foreach(otherNode => sendAppendEntry(otherNode, state, leaderState))
     newTimer
 
   private def sendAppendEntry(otherNodeId: NodeId, state: ServerState, leaderState: LeaderState): Unit =
@@ -267,6 +258,12 @@ private class NodeLoop(loom: Loom, nodeId: NodeId, comms: Comms, stateMachine: S
     logger.debug(s"Response: $msg")
     respond(msg)
 
+  private def setLogAnnotation(role: NodeRole): Unit =
+    role match
+      case _: NodeRole.Follower  => setRoleLogAnnotation("follower")
+      case _: NodeRole.Candidate => setRoleLogAnnotation("candidate")
+      case _: NodeRole.Leader    => setRoleLogAnnotation("leader")
+
 end NodeLoop
 
 /** @param currentTimer
@@ -292,4 +289,4 @@ private object Timer:
   private val random = new SecureRandom()
 
   def apply(loom: Loom, conf: Conf, comms: Comms): Timer =
-    new Timer(loom, conf, comms, () => ())
+    new Timer(loom, conf, comms, Cancellable.Empty)

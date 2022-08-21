@@ -24,3 +24,6 @@ object Loom:
 
 trait Cancellable:
   def cancel(): Unit
+
+object Cancellable:
+  val Empty: Cancellable = () => ()
