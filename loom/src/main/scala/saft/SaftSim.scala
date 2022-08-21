@@ -21,9 +21,8 @@ object SaftSim extends StrictLogging:
       }
 
     // setup nodes
-    val loom = new Loom()
     val comms = InMemoryComms(conf.nodeIds)
-    val stateMachines = conf.nodeIds.map(nodeId => nodeId -> StateMachine.background(loom, applyLogData(nodeId))).toMap
+    val stateMachines = conf.nodeIds.map(nodeId => nodeId -> StateMachine.background(applyLogData(nodeId))).toMap
     val persistence = InMemoryPersistence(conf.nodeIds)
     val nodes = conf.nodeIds.toList
       .map(nodeId => nodeId -> new Node(nodeId, comms(nodeId), stateMachines(nodeId), conf, persistence.forNodeId(nodeId)))
@@ -46,10 +45,10 @@ object SaftSim extends StrictLogging:
     val startPattern = "S(\\d+)".r
 
     @tailrec
-    def handleNextCommand(fibers: Map[NodeId, Loom]): RunDone =
+    def handleNextCommand(fibers: Map[NodeId, Cancellable]): RunDone =
       StdIn.readLine() match
         case "E" =>
-          for (f <- fibers.values) f.close()
+          for (f <- fibers.values) f.cancel()
           logger.info("Bye!")
           RunDone()
 
@@ -70,7 +69,7 @@ object SaftSim extends StrictLogging:
               logger.info(s"Node $nodeNumber is not started")
               handleNextCommand(fibers)
             case Some(fiber) =>
-              fiber.close()
+              fiber.cancel()
               handleNextCommand(fibers.removed(nodeId))
 
         case startPattern(nodeNumber) =>
@@ -78,9 +77,8 @@ object SaftSim extends StrictLogging:
           (fibers.get(nodeId), nodes.get(nodeId)) match
             case (None, Some(node)) =>
               comms(nodeId).drain()
-              val loom = new Loom()
-              node.start(loom)
-              handleNextCommand(fibers + (nodeId -> loom))
+              val fiber = node.start()
+              handleNextCommand(fibers + (nodeId -> fiber))
             case (_, None) =>
               logger.info(s"Unknown node: $nodeNumber")
               handleNextCommand(fibers)
@@ -94,9 +92,8 @@ object SaftSim extends StrictLogging:
     end handleNextCommand
 
     val fibers = for ((nodeId, node) <- nodes) yield {
-      val loom = new Loom()
-      node.start(loom)
-      nodeId -> loom
+      val fiber = node.start()
+      nodeId -> fiber
     }
     handleNextCommand(fibers)
   end handleCommands

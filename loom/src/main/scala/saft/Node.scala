@@ -18,8 +18,8 @@ private enum NodeRole:
 
 /** A Raft node. Communicates with the outside world using [[comms]]. Committed logs are applied to [[stateMachine]]. */
 class Node(nodeId: NodeId, comms: Comms, stateMachine: StateMachine, conf: Conf, persistence: Persistence) extends StrictLogging:
-  def start(loom: Loom): Unit =
-    loom.fork {
+  def start(): Cancellable =
+    Loom { loom =>
       setNodeLogAnnotation(nodeId)
       logger.info("Node started")
       try
@@ -71,6 +71,7 @@ private class NodeLoop(loom: Loom, nodeId: NodeId, comms: Comms, stateMachine: S
         val (r, nr) = appendEntries(ae, role)
         (() => doRespond(r, respond), nr)
       case ServerEvent.RequestReceived(ne: NewEntry, respond) =>
+        println("NEW ENTRY " + ne)
         val (responseFuture, nr) = newEntry(ne, role)
         (() => { loom.fork { doRespond(responseFuture.get, respond) }; () }, nr)
       case ServerEvent.ResponseReceived(rvr: RequestVoteResponse)   => (() => (), requestVoteResponse(rvr, role))

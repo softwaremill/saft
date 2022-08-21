@@ -2,20 +2,25 @@ package saft
 
 import jdk.incubator.concurrent.StructuredTaskScope
 
-class Loom():
-  private val scope: StructuredTaskScope[Any] = new StructuredTaskScope[Any]()
+import java.util.concurrent.Semaphore
+import java.util.concurrent.atomic.AtomicReference
+
+class Loom private (scope: StructuredTaskScope[Any]):
   def fork(t: => Unit): Cancellable =
     val future = scope.fork(() => t)
-    new Cancellable:
-      override def cancel(): Unit = future.cancel(true)
-
-  def close(): Unit = scope.close()
+    () => future.cancel(true)
 
 object Loom:
-  def apply(t: Loom => Unit): Unit =
-    val l = new Loom()
-    try t(l)
-    finally l.close()
+  def apply(t: Loom => Unit): Cancellable =
+    val th = Thread.startVirtualThread { () =>
+      val scope = new StructuredTaskScope[Any]()
+      try t(new Loom(scope))
+      catch case _: InterruptedException => () // ignore
+      finally
+        scope.join()
+        scope.close()
+    }
+    () => th.interrupt()
 
 trait Cancellable:
   def cancel(): Unit

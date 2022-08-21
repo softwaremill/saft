@@ -10,9 +10,9 @@ object StateMachine:
   /** Applies log data using the given [[doApply]] function in sequence, in the background, without blocking the caller (unless the queue
     * that buffers requests is full).
     */
-  def background(loom: Loom, doApply: LogData => Unit): StateMachine =
+  def background(doApply: LogData => Unit): StateMachine =
     val toApplyQueue = new ArrayBlockingQueue[LogData](16)
-    loom.fork {
+    Thread.startVirtualThread { () =>
       while (true) {
         doApply(toApplyQueue.take())
       }
