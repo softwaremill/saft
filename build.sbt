@@ -38,7 +38,7 @@ lazy val loom: Project = (project in file("loom"))
       "com.typesafe.scala-logging" %% "scala-logging" % "3.9.4",
       "dev.zio" %% "zio-json" % zioJsonVersion,
       "com.softwaremill.sttp.client3" %% "core" % sttpVersion,
-      "org.scalatest" %% "scalatest" % "3.2.13" % "test"
+      "org.scalatest" %% "scalatest" % "3.2.13" % Test
     ),
     javaOptions += "--enable-preview --add-modules jdk.incubator.concurrent",
     run / fork := true
