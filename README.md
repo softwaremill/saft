@@ -4,6 +4,8 @@ An implementation of the [Raft](https://raft.github.io) consensus algorithm, usi
 
 If you're new to Scala, you might want to setup your environment first, installing Java and an IDE. [This page](https://scala.page) might be helpful. 
 
+Saft's architecture and evaluation is covered in the [Implementing Raft using a functional effect system](https://softwaremill.com/implementing-raft-using-a-functional-effect-system/) article.
+
 ## Running a Raft simulation
 
 To run the provided in-memory Raft simulation, using 5 nodes, use the following:

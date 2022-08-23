@@ -16,7 +16,13 @@ def setNodeLogAnnotation(nodeId: NodeId): UIO[Unit] = setLogAnnotation(NodeIdLog
 def setRoleLogAnnotation(state: String): UIO[Unit] = setLogAnnotation(RoleLogAnnotation, state)
 
 trait Logging { this: ZIOAppDefault =>
-  private val logFormat = timestamp(DateTimeFormatter.ISO_OFFSET_DATE_TIME).fixed(32).color(LogColor.BLUE) |-|
+  override val bootstrap: ZLayer[Any, Nothing, Unit] = Runtime.removeDefaultLoggers >>>
+    console(Logging.logFormat, LogLevel.Info) >>>
+    file(Paths.get("saft.log"), Logging.logFormat, LogLevel.Debug)
+}
+
+object Logging {
+  val logFormat: LogFormat = timestamp(DateTimeFormatter.ISO_OFFSET_DATE_TIME).fixed(32).color(LogColor.BLUE) |-|
     (text("[") + level + text("]")).color(LogColor.GREEN) |-|
     fiberId.fixed(14).color(LogColor.WHITE) |-|
     annotationValue(NodeIdLogAnnotation).fixed(5).color(LogColor.RED) |-|
@@ -30,8 +36,4 @@ trait Logging { this: ZIOAppDefault =>
         builder.appendText(value)
       }
     }
-
-  override val bootstrap: ZLayer[Any, Nothing, Unit] = Runtime.removeDefaultLoggers >>>
-    console(logFormat, LogLevel.Info) >>>
-    file(Paths.get("saft.log"), logFormat, LogLevel.Debug)
 }
