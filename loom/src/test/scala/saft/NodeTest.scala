@@ -17,7 +17,7 @@ class NodeTest extends AnyFunSuite with Matchers:
     try {
       // when
       forward5seconds() // elect leader
-      newEntry(LogData("entry1"), fixture.comms)
+      newEntry(LogData("entry1"), fixture)
       forward5seconds() // replicate
       // then
       fixture.conf.nodeIds.foreach(nodeId => fixture.applied(nodeId).get shouldBe Vector("entry1"))
@@ -30,17 +30,17 @@ class NodeTest extends AnyFunSuite with Matchers:
     try {
       // when
       forward5seconds() // elect leader
-      val leader = newEntry(LogData("entry1"), fixture.comms)
+      val leader = newEntry(LogData("entry1"), fixture)
       forward5seconds() // replicate
-      fixture.fibers(leader).cancel()
+      val fixture2 = fixture.cancel(leader)
       forward5seconds() // elect new leader
-      newEntry(LogData("entry2"), fixture.comms)
+      newEntry(LogData("entry2"), fixture2)
       forward5seconds() // replicate
       // then
-      fixture.applied(leader).get shouldBe Vector("entry1")
-      fixture.conf.nodeIds
+      fixture2.applied(leader).get shouldBe Vector("entry1")
+      fixture2.conf.nodeIds
         .filterNot(_ == leader)
-        .foreach(nodeId => fixture.applied(nodeId).get shouldBe Vector("entry1", "entry2"))
+        .foreach(nodeId => fixture2.applied(nodeId).get shouldBe Vector("entry1", "entry2"))
     } finally fixture.cancel()
   }
 
@@ -51,7 +51,12 @@ class NodeTest extends AnyFunSuite with Matchers:
       fibers: Map[NodeId, Cancellable],
       applied: Map[NodeId, AtomicReference[Vector[String]]]
   ):
-    def cancel(): Unit = conf.nodeIds.foreach(nodeId => fibers(nodeId).cancel())
+    def cancel(): TestFixture =
+      fibers.values.foreach(_.cancel())
+      copy(fibers = Map.empty)
+    def cancel(nodeId: NodeId): TestFixture =
+      fibers(nodeId).cancel()
+      copy(fibers = fibers.removed(nodeId))
 
   def startNodes(conf: Conf): TestFixture =
     val applied = conf.nodeIds.map(nodeId => nodeId -> new AtomicReference[Vector[String]](Vector.empty)).toMap
@@ -65,18 +70,19 @@ class NodeTest extends AnyFunSuite with Matchers:
     TestFixture(conf, nodes, comms, fibers, applied)
 
   /** Trying adding a new entry to each node in turn, until a leader is found. */
-  def newEntry(data: LogData, comms: Map[NodeId, Comms]): NodeId =
+  def newEntry(data: LogData, fixture: TestFixture): NodeId =
     @tailrec
     def doRun(cs: List[(NodeId, Comms)]): NodeId = cs match
       case Nil => throw new RuntimeException(s"Cannot send new entry $data, no leader")
-      case (n, c) :: tail =>
+      case (n, c) :: tail if fixture.fibers.contains(n) =>
         request(n, NewEntry(data), c) match {
           case RedirectToLeaderResponse(_)       => doRun(tail)
           case NewEntryAddedSuccessfullyResponse => n
           case r => throw new RuntimeException(s"When sending a new entry request, got unexpected response: $r")
         }
+      case _ :: tail => doRun(tail) // fiber must be interrupted
 
-    doRun(comms.toList)
+    doRun(fixture.comms.toList)
 
   def request(toNodeId: NodeId, msg: RequestMessage, comms: Comms): ResponseMessage =
     val p = new CompletableFuture[ResponseMessage]
