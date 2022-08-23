@@ -14,17 +14,13 @@ object SaftSim extends StrictLogging:
   def main(args: Array[String]): Unit =
     // configuration
     val conf = Conf.default(5)
-    val applyLogData = (nodeId: NodeId) =>
-      (data: LogData) => {
-        setNodeLogAnnotation(nodeId)
-        logger.info(s"Apply: $data")
-      }
+    val applyLogData = (nodeId: NodeId) => (data: LogData) => { setNodeLogAnnotation(nodeId); logger.info(s"Apply: $data") }
 
     // setup nodes
     val comms = InMemoryComms(conf.nodeIds)
     val stateMachines = conf.nodeIds.map(nodeId => nodeId -> StateMachine.background(applyLogData(nodeId))).toMap
     val persistence = InMemoryPersistence(conf.nodeIds)
-    val nodes = conf.nodeIds.toList
+    val nodes = conf.nodeIds
       .map(nodeId => nodeId -> new Node(nodeId, comms(nodeId), stateMachines(nodeId), conf, persistence.forNodeId(nodeId)))
       .toMap
     logger.info("Welcome to SaftSim - Scala Raft simulation. Available commands:")
@@ -34,23 +30,20 @@ object SaftSim extends StrictLogging:
     handleCommands(nodes, comms)
   end main
 
-  private case class RunDone()
+  private case class Done()
 
-  private def handleCommands(
-      nodes: Map[NodeId, Node],
-      comms: Map[NodeId, InMemoryComms]
-  ): RunDone =
+  private def handleCommands(nodes: Map[NodeId, Node], comms: Map[NodeId, InMemoryComms]): Done =
     val newEntryPattern = "N(\\d+) (.+)".r
     val killPattern = "K(\\d+)".r
     val startPattern = "S(\\d+)".r
 
     @tailrec
-    def handleNextCommand(fibers: Map[NodeId, Cancellable]): RunDone =
+    def handleNextCommand(fibers: Map[NodeId, Cancellable]): Done =
       StdIn.readLine() match
         case "E" =>
           for (f <- fibers.values) f.cancel()
           logger.info("Bye!")
-          RunDone()
+          Done()
 
         case newEntryPattern(nodeNumber, data) =>
           val nodeId = NodeId(nodeNumber.toInt)
@@ -91,10 +84,7 @@ object SaftSim extends StrictLogging:
           handleNextCommand(fibers)
     end handleNextCommand
 
-    val fibers = for ((nodeId, node) <- nodes) yield {
-      val fiber = node.start()
-      nodeId -> fiber
-    }
+    val fibers = nodes.map((nodeId, node) => nodeId -> node.start())
     handleNextCommand(fibers)
   end handleCommands
 
