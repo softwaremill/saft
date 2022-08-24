@@ -2,9 +2,6 @@ package saft
 
 import jdk.incubator.concurrent.StructuredTaskScope
 
-import java.util.concurrent.Semaphore
-import java.util.concurrent.atomic.AtomicReference
-
 class Loom private (scope: StructuredTaskScope[Any]):
   def fork(t: => Unit): Cancellable =
     val future = scope.fork(() => t)
