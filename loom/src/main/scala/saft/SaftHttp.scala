@@ -2,8 +2,9 @@ package saft
 
 import com.typesafe.scalalogging.StrictLogging
 import jakarta.servlet.http.{HttpServletRequest, HttpServletResponse}
-import org.eclipse.jetty.server.{Handler, Request, Server}
+import org.eclipse.jetty.server.{Handler, Request, Server, ServerConnector}
 import org.eclipse.jetty.server.handler.AbstractHandler
+import org.eclipse.jetty.util.thread.ThreadPool
 import saft.Logging.setNodeLogAnnotation
 import zio.json.*
 import zio.json.internal.Write
@@ -14,7 +15,7 @@ import java.net.http.HttpRequest.BodyPublishers
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.file.{Files, Path as JPath}
 import java.time.Duration
-import java.util.concurrent.{ArrayBlockingQueue, BlockingQueue, CompletableFuture, TimeUnit}
+import java.util.concurrent.{ArrayBlockingQueue, BlockingQueue, CompletableFuture, ExecutorService, Executors, TimeUnit}
 import scala.concurrent.TimeoutException
 
 @main def saftHttp1(): Unit = new SaftHttp(1, JPath.of("saft1.json")).start()
@@ -46,30 +47,38 @@ class SaftHttp(nodeNumber: Int, persistencePath: JPath) extends JsonCodecs with 
     node.start()
 
     // start server
-    val server = new Server(port)
-    server.setHandler(handler(queue)); server.start(); server.join()
+    val server = new Server(new LoomThreadPool)
+    val connector = new ServerConnector(server); connector.setPort(port)
+
+    server.setHandler(handler(queue))
+    server.setConnectors(Array(connector)); server.start(); server.join()
 
   private def handler(queue: BlockingQueue[ServerEvent]): Handler = new AbstractHandler:
     override def handle(target: String, baseRequest: Request, request: HttpServletRequest, response: HttpServletResponse): Unit =
       def errorResponse(e: Exception, statusCode: Int): Unit =
         logger.error(s"Error when processing request to $target", e)
         response.setStatus(statusCode)
-        baseRequest.setHandled(true)
 
       try
         val responseBody =
-          if target.contains(EndpointNames.AppendEntries) then decodingHandler(baseRequest, _.fromJson[AppendEntries], queue)
-          else if target.contains(EndpointNames.RequestVote) then decodingHandler(baseRequest, _.fromJson[RequestVote], queue)
-          else if target.contains(EndpointNames.NewEntry) then decodingHandler(baseRequest, _.fromJson[NewEntry], queue)
+          if target.contains(EndpointNames.AppendEntries) then Some(decodingHandler(baseRequest, _.fromJson[AppendEntries], queue))
+          else if target.contains(EndpointNames.RequestVote) then Some(decodingHandler(baseRequest, _.fromJson[RequestVote], queue))
+          else if target.contains(EndpointNames.NewEntry) then Some(decodingHandler(baseRequest, _.fromJson[NewEntry], queue))
+          else None
 
-        response.setContentType("application/json")
-        response.setStatus(HttpServletResponse.SC_OK)
-        response.getWriter.println(responseBody)
-        baseRequest.setHandled(true)
+        responseBody match
+          case None => response.setStatus(HttpServletResponse.SC_NOT_FOUND)
+          case Some(body) =>
+            response.setContentType("application/json")
+            response.setStatus(HttpServletResponse.SC_OK)
+            response.getWriter.println(body)
       catch
         case e: TimeoutException => errorResponse(e, HttpServletResponse.SC_REQUEST_TIMEOUT)
         case e: DecodeException  => errorResponse(e, HttpServletResponse.SC_BAD_REQUEST)
         case e: Exception        => errorResponse(e, HttpServletResponse.SC_INTERNAL_SERVER_ERROR)
+
+      baseRequest.setHandled(true)
+    end handle
 
   private def decodingHandler[T <: RequestMessage with ToServerMessage](
       request: Request,
@@ -188,4 +197,14 @@ private class FileJsonPersistence(path: JPath) extends Persistence with JsonCode
         case Left(errorMsg) => throw DecodeException(errorMsg)
         case Right(state)   => state
     else ServerState.Initial
+}
+
+// Jetty on Loom, based on: https://github.com/rodrigovedovato/jetty-loom
+class LoomThreadPool extends ThreadPool {
+  val executorService: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
+  def join(): Unit = executorService.awaitTermination(Long.MaxValue, TimeUnit.NANOSECONDS)
+  def getThreads = 1
+  def getIdleThreads = 1
+  def isLowOnThreads = false
+  def execute(command: Runnable): Unit = executorService.submit(command)
 }
