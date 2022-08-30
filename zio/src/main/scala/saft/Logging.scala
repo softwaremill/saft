@@ -8,12 +8,12 @@ import zio.logging.LogFormat.*
 import java.nio.file.Paths
 import java.time.format.{DateTimeFormatter, FormatStyle}
 
-private val StateLogAnnotation = "state"
+private val RoleLogAnnotation = "role"
 private val NodeIdLogAnnotation = "nodeId"
 
 private def setLogAnnotation(key: String, value: String): UIO[Unit] = FiberRef.currentLogAnnotations.update(_ + (key -> value))
 def setNodeLogAnnotation(nodeId: NodeId): UIO[Unit] = setLogAnnotation(NodeIdLogAnnotation, "node" + nodeId.number)
-def setStateLogAnnotation(state: String): UIO[Unit] = setLogAnnotation(StateLogAnnotation, state)
+def setRoleLogAnnotation(state: String): UIO[Unit] = setLogAnnotation(RoleLogAnnotation, state)
 
 trait Logging { this: ZIOAppDefault =>
   override val bootstrap: ZLayer[Any, Nothing, Unit] = Runtime.removeDefaultLoggers >>>
@@ -26,7 +26,7 @@ object Logging {
     (text("[") + level + text("]")).color(LogColor.GREEN) |-|
     fiberId.fixed(14).color(LogColor.WHITE) |-|
     annotationValue(NodeIdLogAnnotation).fixed(5).color(LogColor.RED) |-|
-    annotation(StateLogAnnotation) |-|
+    annotation(RoleLogAnnotation) |-|
     line.highlight |-|
     cause.color(LogColor.RED)
 

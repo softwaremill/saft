@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<configuration scan="true">
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS}%boldYellow( [%X{nodeId} %X{role}] ) %-5level %logger{5} - %msg%n%rEx</pattern>
+    </encoder>
+  </appender>
+
+  <logger name="saft" level="${LOG_LEVEL:-INFO}" additivity="false">
+    <appender-ref ref="STDOUT"/>
+  </logger>
+
+  <root level="${LOG_LEVEL:-INFO}">
+    <appender-ref ref="STDOUT"/>
+  </root>
+
+</configuration>
