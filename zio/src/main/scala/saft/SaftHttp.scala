@@ -58,7 +58,7 @@ class SaftHttp(nodeNumber: Int, persistencePath: JPath) extends ZIOAppDefault wi
       decode: String => Either[String, T],
       queue: Queue[ServerEvent]
   ): Task[Response] =
-    request.bodyAsString.map(decode).flatMap {
+    request.body.asString.map(decode).flatMap {
       case Right(msg) =>
         for {
           p <- Promise.make[Nothing, ResponseMessage]

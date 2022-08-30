@@ -20,7 +20,7 @@ lazy val zio: Project = (project in file("zio"))
     libraryDependencies ++= Seq(
       "dev.zio" %% "zio" % "2.0.2",
       "dev.zio" %% "zio-logging" % "2.1.0",
-      "io.d11" %% "zhttp" % "2.0.0-RC10",
+      "io.d11" %% "zhttp" % "2.0.0-RC11",
       "dev.zio" %% "zio-json" % zioJsonVersion,
       "com.softwaremill.sttp.client3" %% "zio" % sttpVersion,
       "dev.zio" %% "zio-test" % "2.0.2" % Test,
