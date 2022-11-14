@@ -5,7 +5,7 @@ val zioJsonVersion = "0.3.0"
 
 lazy val commonSettings = commonSmlBuildSettings ++ Seq(
   organization := "com.softwaremill.saft",
-  scalaVersion := "3.2.0"
+  scalaVersion := "3.2.1"
 )
 
 lazy val rootProject = (project in file("."))
@@ -19,7 +19,7 @@ lazy val zio: Project = (project in file("zio"))
     name := "zio",
     libraryDependencies ++= Seq(
       "dev.zio" %% "zio" % "2.0.2",
-      "dev.zio" %% "zio-logging" % "2.1.3",
+      "dev.zio" %% "zio-logging" % "2.1.4",
       "io.d11" %% "zhttp" % "2.0.0-RC11",
       "dev.zio" %% "zio-json" % zioJsonVersion,
       "com.softwaremill.sttp.client3" %% "zio" % sttpVersion,
