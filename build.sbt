@@ -18,13 +18,13 @@ lazy val zio: Project = (project in file("zio"))
   .settings(
     name := "zio",
     libraryDependencies ++= Seq(
-      "dev.zio" %% "zio" % "2.0.2",
+      "dev.zio" %% "zio" % "2.0.4",
       "dev.zio" %% "zio-logging" % "2.1.4",
       "io.d11" %% "zhttp" % "2.0.0-RC11",
       "dev.zio" %% "zio-json" % zioJsonVersion,
       "com.softwaremill.sttp.client3" %% "zio" % sttpVersion,
-      "dev.zio" %% "zio-test" % "2.0.2" % Test,
-      "dev.zio" %% "zio-test-sbt" % "2.0.2" % Test
+      "dev.zio" %% "zio-test" % "2.0.4" % Test,
+      "dev.zio" %% "zio-test-sbt" % "2.0.4" % Test
     ),
     testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
   )
