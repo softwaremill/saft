@@ -37,7 +37,7 @@ lazy val loom: Project = (project in file("loom"))
       "ch.qos.logback" % "logback-classic" % "1.4.5",
       "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
       "dev.zio" %% "zio-json" % zioJsonVersion,
-      "org.eclipse.jetty" % "jetty-server" % "11.0.13",
+      "org.eclipse.jetty" % "jetty-server" % "11.0.14",
       "org.scalatest" %% "scalatest" % "3.2.15" % Test
     ),
     javaOptions += "--enable-preview --add-modules jdk.incubator.concurrent",
