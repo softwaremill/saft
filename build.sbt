@@ -1,7 +1,7 @@
 import com.softwaremill.SbtSoftwareMillCommon.commonSmlBuildSettings
 
 val sttpVersion = "3.8.5"
-val zioJsonVersion = "0.4.2"
+val zioJsonVersion = "0.5.0"
 
 lazy val commonSettings = commonSmlBuildSettings ++ Seq(
   organization := "com.softwaremill.saft",
