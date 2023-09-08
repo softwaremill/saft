@@ -5,7 +5,7 @@ val zioJsonVersion = "0.4.2"
 
 lazy val commonSettings = commonSmlBuildSettings ++ Seq(
   organization := "com.softwaremill.saft",
-  scalaVersion := "3.3.0"
+  scalaVersion := "3.3.1"
 )
 
 lazy val rootProject = (project in file("."))
