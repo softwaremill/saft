@@ -34,7 +34,7 @@ lazy val loom: Project = (project in file("loom"))
   .settings(
     name := "loom",
     libraryDependencies ++= Seq(
-      "ch.qos.logback" % "logback-classic" % "1.4.11",
+      "ch.qos.logback" % "logback-classic" % "1.4.14",
       "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5",
       "dev.zio" %% "zio-json" % zioJsonVersion,
       "org.eclipse.jetty" % "jetty-server" % "11.0.16",
