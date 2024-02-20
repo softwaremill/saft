@@ -57,8 +57,7 @@ object SaftSim extends ZIOAppDefault with Logging {
             case Some(fiber) => fiber.interrupt *> handleNextCommand(fibers.removed(nodeId))
 
         case startPattern(nodeNumber) =>
-          val nodeId = NodeId(nodeNumber.toInt)
-          (fibers.get(nodeId), nodes.get(nodeId)) match
+          val nodeId = NodeId(nodeNumber.toInt)(fibers.get(nodeId), nodes.get(nodeId)) match
             case (None, Some(node)) =>
               comms(nodeId).drain *> node.start.fork.flatMap(fiber => handleNextCommand(fibers + (nodeId -> fiber)))
             case (_, None)          => ZIO.log(s"Unknown node: $nodeNumber") *> handleNextCommand(fibers)
